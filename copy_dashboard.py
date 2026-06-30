@@ -55,6 +55,23 @@ def get_sources() -> dict:
     return _SRC["map"]
 
 
+# ----------------------------- текущий watchlist (для скрытия удалённых) -----------------------------
+_WL = {"mtime": 0, "set": set(), "path": "copy_watchlist.json"}
+
+
+def get_watchlist() -> set:
+    p = Path(STATE.get("wl_path") or _WL["path"])
+    try:
+        m = p.stat().st_mtime
+        if m != _WL["mtime"]:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            _WL["set"] = {w.lower() for w in d.get("watchlist", [])}
+            _WL["mtime"] = m
+    except Exception:  # noqa: BLE001
+        pass
+    return _WL["set"]
+
+
 # ----------------------------- статистика для страницы -----------------------------
 def compute_stats(book: dict, marks: dict) -> dict:
     from collections import defaultdict
@@ -115,6 +132,9 @@ def compute_stats(book: dict, marks: dict) -> dict:
             "flag": flag,
             "source": sources.get(w, "—"),
         })
+    wlset = get_watchlist()
+    if wlset:                                                  # скрываем удалённые из рейтинга (позиции их доживут сами)
+        per_wallet = [w for w in per_wallet if w["wallet"].lower() in wlset]
     per_wallet.sort(key=lambda x: x["total"], reverse=True)   # авто-ранжирование по форвардному PnL
 
     positions = sorted(book["positions"].values(), key=lambda p: p["cost"], reverse=True)
@@ -273,6 +293,8 @@ PAGE = r"""<!doctype html>
   .addr{font-family:ui-monospace,monospace;color:var(--accent);font-size:12px}
   .addr.clk{cursor:pointer;text-decoration:underline dotted}
   .addr.clk:hover{color:#fff}
+  .del{cursor:pointer;color:var(--muted);font-weight:700;padding:0 6px;border-radius:5px}
+  .del:hover{color:#fff;background:rgba(255,59,107,.25)}
   .title{color:var(--text);max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;font-weight:600}
   .tag.BUY{background:rgba(88,166,255,.15);color:var(--accent)}
@@ -320,7 +342,7 @@ PAGE = r"""<!doctype html>
 
   <div class="sec">По кошелькам — авто-ранжирование по форвардному PnL</div>
   <table>
-    <thead><tr><th>#</th><th>Кошелёк</th><th>Источник</th><th>Скопир.</th><th>Задейств.</th><th>Закрыто</th><th>Открыто</th><th>Винрейт</th><th>Реализ. PnL</th><th>Нереализ. PnL</th><th>PnL итого</th><th>Статус</th></tr></thead>
+    <thead><tr><th>#</th><th>Кошелёк</th><th>Источник</th><th>Скопир.</th><th>Задейств.</th><th>Закрыто</th><th>Открыто</th><th>Винрейт</th><th>Реализ. PnL</th><th>Нереализ. PnL</th><th>PnL итого</th><th>Статус</th><th></th></tr></thead>
     <tbody id="wallets"></tbody>
   </table>
 
@@ -407,6 +429,14 @@ const sideBadge = o => {
 const flagBadge = f => f==="lead" ? '<span class="tag YES">лидер</span>'
   : f==="drop" ? '<span class="tag NO">на отсев</span>' : '<span class="muted">—</span>';
 const addrLink = a => '<span class="addr clk" onclick="openWallet(\''+a+'\')">'+shortAddr(a)+'</span>';
+async function removeWallet(a){
+  if(!confirm("Удалить кошелёк "+shortAddr(a)+"?\nКопирование новых сделок прекратится. Открытые позиции до-резолвятся сами.")) return;
+  try{
+    const r = await (await fetch("/api/remove_wallet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({wallet:a})})).json();
+    if(!r.ok){ alert("Не удалось удалить: "+(r.error||"")); return; }
+  }catch(e){ alert("Ошибка сети"); return; }
+  tick();
+}
 let curWallet=null;
 function closeWallet(){ curWallet=null; $("wmodal").classList.remove("show"); }
 async function openWallet(a){ curWallet=a; $("wmodal").classList.add("show"); await loadWallet(); }
@@ -542,8 +572,9 @@ async function tick(){
     '<td class="num '+cls(w.realized)+'">'+money(w.realized)+'</td>'+
     '<td class="num '+cls(w.unrealized)+'">'+money(w.unrealized)+'</td>'+
     '<td class="num '+cls(w.total)+'">'+money(w.total)+(w.spent>0?' <span class="muted">('+(w.total/w.spent>=0?'+':'')+(w.total/w.spent*100).toFixed(0)+'%)</span>':'')+'</td>'+
-    '<td>'+flagBadge(w.flag)+'</td></tr>').join("")
-    || '<tr><td colspan="12" class="empty">пока ничего не скопировано — ждём первые сделки целей</td></tr>';
+    '<td>'+flagBadge(w.flag)+'</td>'+
+    '<td><span class="del" title="удалить кошелёк" onclick="removeWallet(\''+w.wallet+'\')">✕</span></td></tr>').join("")
+    || '<tr><td colspan="13" class="empty">пока ничего не скопировано — ждём первые сделки целей</td></tr>';
 
   $("open").innerHTML = (d.open_positions||[]).map(p=>{
     const pl = p.pnl!=null ? p.pnl : (p.val-p.cost);
@@ -794,6 +825,32 @@ def api_wallet():
                     "shadow_rows": shadow_rows[:120]})
 
 
+@app.route("/api/remove_wallet", methods=["POST"])
+def api_remove_wallet():
+    """Удалить кошелёк из watchlist (копирование новых сделок прекращается; открытые позиции
+    до-резолвятся сами через независимый оракул). Файл watchlist перечитывается на лету."""
+    addr = ((request.get_json(silent=True) or {}).get("wallet", "") or "").lower()
+    if not addr:
+        return jsonify({"ok": False, "error": "no wallet"}), 400
+    path = Path(STATE.get("wl_path") or "copy_watchlist.json")
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(e)}), 500
+    before = len(d.get("watchlist", []))
+    d["watchlist"] = [w for w in d.get("watchlist", []) if w.lower() != addr]
+    d["count"] = len(d["watchlist"])
+    path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:                                                       # пометка в источниках (для истории)
+        sp = Path("wallet_sources.json")
+        s = json.loads(sp.read_text(encoding="utf-8"))
+        s[addr] = "удалён-вручную"
+        sp.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    return jsonify({"ok": True, "removed": before - d["count"], "count": d["count"]})
+
+
 def main():
     p = argparse.ArgumentParser(description="Веб-дашборд бумажного копи")
     p.add_argument("--wallets", help="адреса целей через запятую")
@@ -814,6 +871,7 @@ def main():
     wallets = [w.lower() for w in wallets]
 
     STATE["book"] = ct.load_book(args.state, args.bankroll)
+    STATE["wl_path"] = args.from_watchlist          # путь watchlist для кнопки удаления / фильтра рейтинга
     STATE["status"]["wallets"] = len(wallets)
     STATE["cfg"] = {"interval": args.interval, "per_trade": args.per_trade, "slippage": args.slippage}
 
