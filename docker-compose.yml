@@ -10,6 +10,6 @@ services:
       PER_TRADE: "100"
       INTERVAL: "120"
     ports:
-      - "5000:5000"        # наружу НЕ торчит: смотрим через SSH-туннель (безопасно)
+      - "5000:5000"                  # открыт по http://IP:5000 (бумага, без ключей — ок)
     volumes:
       - .:/app                       # состояние (paper_book, watchlist, perf_history) живёт на хосте

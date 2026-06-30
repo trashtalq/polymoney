@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Polymoney — copy PnL</title>
+<style>
+  :root{--bg:#05080d;--panel:#0a1019;--panel2:#0e1622;--border:#15323d;--text:#cdeef0;
+        --muted:#5d7c8a;--green:#2bf5b0;--red:#ff3b6b;--accent:#06e5ff;--amber:#ffc23d;}
+  *{box-sizing:border-box}
+  body{margin:0;color:var(--text);font-size:14px;
+       font-family:ui-monospace,"JetBrains Mono",Consolas,monospace;
+       background:radial-gradient(1200px 600px at 82% -12%,rgba(6,229,255,.07),transparent 60%),
+                  radial-gradient(900px 520px at -5% 112%,rgba(255,59,107,.06),transparent 60%),
+                  linear-gradient(180deg,#05080d,#04060a);background-attachment:fixed}
+  body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:9;
+       background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.16) 2px 3px);opacity:.4}
+  .wrap{max-width:1180px;margin:0 auto;padding:22px 18px 60px;position:relative;z-index:1}
+  h1{font-size:16px;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);
+     text-shadow:0 0 10px rgba(6,229,255,.55);margin:0}
+  .status{color:var(--muted);font-size:12px;margin-top:4px}
+  .hero{font-size:42px;font-weight:700;margin:12px 0 2px;text-shadow:0 0 20px currentColor}
+  .hero .sub{font-size:13px;color:var(--muted);margin-left:10px;text-shadow:none}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:18px 0}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--border);
+        border-radius:8px;padding:13px 15px;position:relative;overflow:hidden}
+  .card::before{content:"";position:absolute;left:0;top:0;height:100%;width:2px;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+  .card .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1px}
+  .card .v{font-size:22px;font-weight:700;margin-top:5px}
+  .sec{margin:26px 0 10px;font-size:12px;color:var(--accent);text-transform:uppercase;letter-spacing:2px;
+       border-left:3px solid var(--accent);padding-left:9px}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  th,td{padding:9px 12px;text-align:right;border-bottom:1px solid var(--border)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:1px;background:var(--panel2);border-bottom:1px solid var(--accent)}
+  tr:last-child td{border-bottom:none}
+  .pos{color:var(--green);text-shadow:0 0 7px rgba(43,245,176,.4)}
+  .neg{color:var(--red);text-shadow:0 0 7px rgba(255,59,107,.4)}.zero{color:var(--muted)}
+  .addr{color:var(--accent);font-size:12px}.title{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;font-weight:700}
+  .YES{background:rgba(43,245,176,.15);color:var(--green)}.NO{background:rgba(255,59,107,.15);color:var(--red)}
+  .rtag{display:inline-block;padding:1px 6px;border-radius:5px;font-size:10px;background:var(--panel2);color:var(--muted)}
+  .empty{color:var(--muted);text-align:center}
+</style></head><body><div class="wrap">
+  <h1>◢ POLYMONEY · COPY PnL</h1>
+  <div class="status" id="status">загрузка…</div>
+  <div class="hero" id="hero">—</div>
+  <div class="cards" id="cards"></div>
+  <div class="sec">По кошелькам — форвардный PnL</div>
+  <table><thead><tr><th>#</th><th>Кошелёк</th><th>Источник</th><th>Скоп.</th><th>Закр.</th><th>Откр.</th><th>Реализ.</th><th>Нереализ.</th><th>Итого</th><th>Статус</th></tr></thead><tbody id="wallets"></tbody></table>
+  <div class="sec">Открытые позиции</div>
+  <table><thead><tr><th>Кошелёк</th><th>Рынок</th><th>Ставка</th><th>Вход</th><th>Кэф</th><th>Вложено</th><th>P/L</th></tr></thead><tbody id="open"></tbody></table>
+  <div class="sec">Последние сделки</div>
+  <table><thead><tr><th>Кошелёк</th><th>Действие</th><th>Ставка</th><th>Рынок</th><th>PnL/сумма</th></tr></thead><tbody id="log"></tbody></table>
+<script>
+const $=id=>document.getElementById(id);
+const money=v=>(v<0?"-":"")+"$"+Math.abs(v||0).toLocaleString("en-US",{maximumFractionDigits:0});
+const cls=v=>v>0.005?"pos":(v<-0.005?"neg":"zero");
+const sa=a=>a?a.slice(0,8)+"…"+a.slice(-4):"?";
+const side=o=>{const s=(o||"").toLowerCase();return s==="yes"||s==="да"?'<span class="tag YES">ДА</span>':s==="no"||s==="нет"?'<span class="tag NO">НЕТ</span>':(o?'<span class="rtag">'+o+'</span>':'—');};
+const flag=f=>f==="lead"?'<span class="tag YES">лидер</span>':f==="drop"?'<span class="tag NO">на отсев</span>':'<span class="zero">—</span>';
+async function load(){
+  let d; try{ d=await (await fetch("./state.json?_="+Date.now())).json(); }
+  catch(e){ $("status").textContent="нет данных (ждём первый цикл)"; return; }
+  const st=d.status||{};
+  const upd = st.last_poll? new Date(st.last_poll*1000).toLocaleString():"—";
+  $("status").innerHTML='целей <b>'+(st.wallets||0)+'</b> · обновлено '+upd;
+  $("hero").className="hero "+cls(d.pnl);
+  $("hero").innerHTML=money(d.pnl)+'<span class="sub">итого PnL · реализ. '+money(d.realized)+' · '+((d.roi||0)*100).toFixed(1)+'% от банкролла</span>';
+  $("cards").innerHTML=[["Реализовано",money(d.realized),cls(d.realized)],["Нереализ.",money(d.unrealized),cls(d.unrealized)],
+    ["Открытых поз",d.n_open,""],["Вложено в откр.",money(d.invested_open),""],["Свободный кэш",money(d.cash),""],
+    ["Долито",money(d.topups||0),""],["Банкролл",money(d.bankroll),""]]
+    .map(c=>'<div class="card"><div class="k">'+c[0]+'</div><div class="v '+c[2]+'">'+c[1]+'</div></div>').join("");
+  $("wallets").innerHTML=(d.per_wallet||[]).map((w,i)=>'<tr><td class="zero">'+(i+1)+'</td><td><span class="addr">'+sa(w.wallet)+'</span></td>'+
+    '<td><span class="rtag">'+(w.source||"—")+'</span></td><td>'+w.copied+'</td><td>'+w.closed+'</td><td>'+(w.open_n||0)+'</td>'+
+    '<td class="'+cls(w.realized)+'">'+money(w.realized)+'</td><td class="'+cls(w.unrealized)+'">'+money(w.unrealized)+'</td>'+
+    '<td class="'+cls(w.total)+'">'+money(w.total)+'</td><td>'+flag(w.flag)+'</td></tr>').join("")||'<tr><td colspan="10" class="empty">пусто</td></tr>';
+  $("open").innerHTML=(d.open_positions||[]).slice(0,200).map(p=>{const pl=p.pnl;return '<tr><td><span class="addr">'+sa(p.wallet)+'</span></td>'+
+    '<td class="title">'+(p.title||"")+'</td><td>'+side(p.outcome)+'</td><td class="zero">'+(p.entry!=null?p.entry.toFixed(3):"—")+'</td>'+
+    '<td>'+(p.mark!=null?p.mark.toFixed(3):"—")+'</td><td class="zero">'+money(p.cost)+'</td><td class="'+cls(pl)+'">'+money(pl)+'</td></tr>';}).join("")||'<tr><td colspan="7" class="empty">нет</td></tr>';
+  $("log").innerHTML=(d.log||[]).map(r=>{const v=r.pnl!=null?'<span class="'+cls(r.pnl)+'">'+money(r.pnl)+'</span>':'<span class="zero">'+money(r.spend||0)+'</span>';
+    return '<tr><td><span class="addr">'+sa(r.w)+'</span></td><td><span class="rtag">'+r.act+'</span></td><td>'+side(r.out)+'</td><td class="title">'+(r.title||"")+'</td><td>'+v+'</td></tr>';}).join("")||'<tr><td colspan="5" class="empty">нет</td></tr>';
+}
+load(); setInterval(load,60000);
+</script></div></body></html>

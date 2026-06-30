@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($book = Get-Content D:\\\\polymoney\\\\paper_book.json | ConvertFrom-Json; Write-Host \"Bankroll: $\\($book.bankroll\\)\"; Write-Host \"Cash: $\\($book.cash\\)\"; Write-Host \"Per-trade: \\(check launch args\\)\"; Write-Host \"Seen wallets:\"; $book.seen.PSObject.Properties | ForEach-Object { Write-Host \"  $\\($_.Name\\)\" })",
+      "PowerShell(Copy-Item D:\\\\polymoney\\\\paper_book.json D:\\\\polymoney\\\\paper_book_100k_backup.json)",
+      "PowerShell($lines = Get-Content D:\\\\polymoney\\\\wallet_progress.jsonl; $passed = $lines | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.passes -eq $true } | Sort-Object composite -Descending; $wl = @\\($passed | ForEach-Object { $_.wallet }\\); Write-Host \"Кошельков: $\\($wl.Count\\)\"; $obj = [ordered]@{ generated = [int][double]::Parse\\(\\(Get-Date -UFormat %s\\)\\); count = $wl.Count; watchlist = $wl }; $obj | ConvertTo-Json | Out-File -FilePath D:\\\\polymoney\\\\copy_watchlist_18.json -Encoding utf8; Write-Host \"Записано в copy_watchlist_18.json\")",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"Name like '%python%'\")",
+      "Bash(nohup python copy_dashboard.py --from-watchlist copy_watchlist_18.json --bankroll 10000 --per-trade 10 --interval 120 --state paper_book_10k.json)",
+      "Bash(echo \"started pid $!\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5000/)",
+      "Bash(python -c \"import json; b=json.load\\(open\\('paper_book_10k.json'\\)\\); print\\('bankroll', b['bankroll']\\); print\\('cash', b['cash']\\); print\\('seen wallets', len\\(b['seen']\\)\\); print\\('positions', len\\(b['positions']\\)\\); print\\('n_copied', b['n_copied']\\)\")",
+      "PowerShell($conns = Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue; if \\($conns\\) { $conns.OwningProcess | Select-Object -Unique | ForEach-Object { Write-Host \"stopping PID $_\"; Stop-Process -Id $_ -Force } } else { Write-Host \"нет слушателя на 5000\" }; Start-Sleep -Seconds 2; \\(Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue | Measure-Object\\).Count)",
+      "Bash(PYTHONUTF8=1 nohup python copy_dashboard.py --from-watchlist copy_watchlist_18.json --bankroll 100000 --per-trade 10 --interval 120 --state paper_book_10k.json)",
+      "Bash(ps -W)",
+      "Bash(python -)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('copy_trader.py',encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('copy_dashboard.py',encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { $c.OwningProcess | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force; Write-Host \"stopped $_\" } } ; Start-Sleep 2; \"listeners: \" + \\(Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue | Measure-Object\\).Count)",
+      "Bash(PYTHONUTF8=1 nohup python copy_dashboard.py --from-watchlist copy_watchlist.json --bankroll 100000 --per-trade 10 --interval 120 --state paper_book_10k.json)",
+      "Bash(echo \"pid $!\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('bankroll',d['bankroll'],'| copied',d['n_copied'],'| skipped',d['n_skipped'],'| open',d['n_open'],'| targets',d['status']['wallets']\\)\")"
+    ]
+  }
+}

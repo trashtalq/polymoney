@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "copy-dashboard-main",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "copy_dashboard.py",
+        "--from-watchlist", "copy_watchlist.json",
+        "--bankroll", "100000",
+        "--per-trade", "100",
+        "--interval", "120",
+        "--state", "paper_book.json",
+        "--port", "5000"
+      ],
+      "port": 5000
+    }
+  ]
+}
