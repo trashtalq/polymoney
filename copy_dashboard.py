@@ -37,10 +37,6 @@ ADMIN_HASH = (hashlib.sha256(os.environ["ADMIN_PASS"].encode("utf-8")).hexdigest
               else "a7a73bb77842473cec098b5635043d41654b66dff80475a9f6a6178b6b36ea34")
 
 
-def _auth_ok() -> bool:
-    return hashlib.sha256(request.headers.get("X-Auth", "").encode("utf-8")).hexdigest() == ADMIN_HASH
-
-
 _lock = threading.Lock()
 STATE = {
     "book": None,
@@ -448,7 +444,7 @@ async function removeWallet(a){
   if(!pw){ pw = prompt("Пароль:") || ""; if(!pw) return; localStorage.setItem("pw", pw); }
   try{
     const resp = await fetch("/api/remove_wallet",{method:"POST",
-      headers:{"Content-Type":"application/json","X-Auth":pw},body:JSON.stringify({wallet:a})});
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({wallet:a, pw:pw})});
     if(resp.status===401){ localStorage.removeItem("pw"); alert("Неверный пароль — попробуй ещё раз"); return; }
     const r = await resp.json();
     if(!r.ok){ alert("Не удалось удалить: "+(r.error||"")); return; }
@@ -847,9 +843,10 @@ def api_wallet():
 def api_remove_wallet():
     """Удалить кошелёк из watchlist (копирование новых сделок прекращается; открытые позиции
     до-резолвятся сами через независимый оракул). Файл watchlist перечитывается на лету."""
-    if not _auth_ok():
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
         return jsonify({"ok": False, "error": "auth"}), 401
-    addr = ((request.get_json(silent=True) or {}).get("wallet", "") or "").lower()
+    addr = (data.get("wallet", "") or "").lower()
     if not addr:
         return jsonify({"ok": False, "error": "no wallet"}), 400
     path = Path(STATE.get("wl_path") or "copy_watchlist.json")
