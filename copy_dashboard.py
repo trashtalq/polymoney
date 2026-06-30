@@ -613,7 +613,7 @@ async function tick(){
     '<td class="title">'+(r.title||"")+'</td><td>'+v+'</td></tr>';}).join("")
     || '<tr><td colspan="6" class="empty">журнал пуст</td></tr>';
 }
-const REASON_LBL = {band:"цена у края", adverse:"догон от цели", avg_up:"догон вверх", cap:"потолок позиции", sport:"футбол/спорт"};
+const REASON_LBL = {band:"цена у края", adverse:"догон от цели", avg_up:"догон вверх", cap:"потолок позиции", sport:"футбол/спорт", weather:"погода"};
 let skipOpen=false;
 function closeSkipped(){ skipOpen=false; $("modal").classList.remove("show"); }
 async function openSkipped(){
@@ -868,6 +868,21 @@ def api_remove_wallet():
     return jsonify({"ok": True, "removed": before - d["count"], "count": d["count"]})
 
 
+@app.route("/api/purge_blocked", methods=["POST"])
+def api_purge_blocked():
+    """Пересчитать книгу как будто футбол/погода никогда не копировались (пароль в теле)."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    with _lock:
+        res = ct.purge_blocked(STATE["book"])
+        try:
+            ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
+        except Exception:  # noqa: BLE001
+            pass
+    return jsonify({"ok": True, **res})
+
+
 @app.route("/api/category")
 def api_category():
     """PnL по категории рынков (kw=слово1,слово2). Реализ.(из лога) + нереализ.(по марку) + % на задействованное."""
@@ -932,6 +947,7 @@ def main():
     wallets = [w.lower() for w in wallets]
 
     STATE["book"] = ct.load_book(args.state, args.bankroll)
+    STATE["state_file"] = args.state                # путь книги (для эндпоинта пересчёта)
     STATE["wl_path"] = args.from_watchlist          # путь watchlist для кнопки удаления / фильтра рейтинга
     STATE["status"]["wallets"] = len(wallets)
     STATE["cfg"] = {"interval": args.interval, "per_trade": args.per_trade, "slippage": args.slippage}

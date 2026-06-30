@@ -58,9 +58,44 @@ SPORT_MARKET_KW = (
 )
 
 
-def _is_sport_market(title: str) -> bool:
+# НЕ копируем погодные рынки (температурные брекеты и т.п.) — ниша без эджа, флудит книгу.
+# Ключи подобраны без политических ложных срабатываний (НЕ "rain"=Ukraine, НЕ "snow"=Snowden, НЕ "storm"=Stormy).
+WEATHER_KW = (
+    "temperature", "°c", "°f", "°", "weather", "hurricane", "tornado", "wildfire",
+    "heatwave", "snowfall", "rainfall", "warmest", "coldest", "celsius", "fahrenheit",
+)
+
+
+def _blocked_reason(title: str):
+    """Возвращает 'sport'/'weather' если рынок не копируем, иначе None."""
     t = (title or "").lower()
-    return any(k in t for k in SPORT_MARKET_KW)
+    if any(k in t for k in SPORT_MARKET_KW):
+        return "sport"
+    if any(k in t for k in WEATHER_KW):
+        return "weather"
+    return None
+
+
+def purge_blocked(book: dict) -> dict:
+    """Пересчёт книги «как будто футбол/погода никогда не копировались»: удаляет такие позиции
+    и записи лога, заново сводит realized/bankroll/cash/topups (консистентно, режим автодолива)."""
+    base = 100000.0
+    removed = [k for k, p in book.get("positions", {}).items() if _blocked_reason(p.get("title"))]
+    for k in removed:
+        book["positions"].pop(k, None)
+    book["log"] = [r for r in book.get("log", []) if not _blocked_reason(r.get("title"))]
+    realized = sum((r.get("pnl") or 0) for r in book["log"] if "pnl" in r)
+    n_copied = sum(1 for r in book["log"] if r.get("act") == "BUY")
+    invested = sum(p["cost"] for p in book["positions"].values())
+    topups = max(0.0, invested - realized - base)
+    book["realized"] = round(realized, 2)
+    book["n_copied"] = n_copied
+    book["topups"] = round(topups, 2)
+    book["bankroll"] = round(base + topups, 2)
+    book["cash"] = round(base + topups + realized - invested, 2)
+    return {"removed_positions": len(removed), "positions_left": len(book["positions"]),
+            "realized": book["realized"], "bankroll": book["bankroll"],
+            "cash": book["cash"], "topups": book["topups"]}
 
 # --- Сайзинг по убеждённости: $per-trade = ПОТОЛОК НА ВХОД, вниз масштабируем по ставке цели ---
 SIZE_BY_CONVICTION = True
@@ -247,7 +282,7 @@ def _record_skip(book: dict, e: dict, base: float, reason: str,
 # ----------------------------- ЗЕРКАЛЬНЫЕ операции (полная копия цели) -----------------------------
 def _mirror_buy(book: dict, e: dict, per_trade: float, wallet: str) -> bool:
     """Вход по цене ЦЕЛИ, без EV-фильтра/слиппеджа. Сайзинг и потолок позиции — как риск-слой."""
-    if _is_sport_market(ev_title(e)):                 # не копируем футбол/спорт
+    if _blocked_reason(ev_title(e)):                  # не копируем футбол/спорт/погоду
         book["n_skipped"] = book.get("n_skipped", 0) + 1
         return False
     px = ev_price(e)
@@ -354,8 +389,9 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
     _th = book.setdefault("thold", {})
     _k = f"{wallet}|{ev_token(e)}"
     _th[_k] = _th.get(_k, 0.0) + _f(e, "size")
-    if _is_sport_market(ev_title(e)):                  # не копируем футбол/спорт (даже у no-filter)
-        return _record_skip(book, e, base, "sport", per_trade, slippage, wallet)
+    _br = _blocked_reason(ev_title(e))                  # не копируем футбол/спорт/погоду (даже у no-filter)
+    if _br:
+        return _record_skip(book, e, base, _br, per_trade, slippage, wallet)
     nf = (wallet or "").lower() in NO_FILTER_WALLETS   # персональное отключение EV-фильтра
     # --- фильтр копируемости: пропускаем сделки с разрушенным EV (кроме no-filter кошельков) ---
     their = ev_price(e)
