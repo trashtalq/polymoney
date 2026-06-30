@@ -374,7 +374,7 @@ PAGE = r"""<!doctype html>
     </table>
     <div class="sec" style="margin:16px 0 8px">🟢 Открытые позиции <span id="wopenc" class="muted"></span></div>
     <table>
-      <thead><tr><th>Рынок</th><th>Ставка</th><th>Вход</th><th>Тек. кэф</th><th>Вложено</th><th>Оценка</th><th>P/L</th></tr></thead>
+      <thead><tr><th>Рынок</th><th>Ставка</th><th>Открыта</th><th>Вход</th><th>Тек. кэф</th><th>Вложено</th><th>Оценка</th><th>P/L</th></tr></thead>
       <tbody id="wpos"></tbody>
     </table>
     <div class="sec" style="margin:16px 0 8px">⚪ Закрытые позиции <span id="wclosedc" class="muted"></span></div>
@@ -395,7 +395,8 @@ const $ = id => document.getElementById(id);
 const money = v => (v<0?"-":"")+"$"+Math.abs(v).toLocaleString("en-US",{maximumFractionDigits:0});
 const cls = v => v>0.005?"pos":(v<-0.005?"neg":"zero");
 const ago = ts => { if(!ts) return "—"; const s=Math.floor(Date.now()/1000-ts);
-  if(s<60) return s+"с назад"; if(s<3600) return Math.floor(s/60)+"м назад"; return Math.floor(s/3600)+"ч назад"; };
+  if(s<60) return s+"с назад"; if(s<3600) return Math.floor(s/60)+"м назад";
+  if(s<86400) return Math.floor(s/3600)+"ч назад"; return Math.floor(s/86400)+"д назад"; };
 const shortAddr = a => a ? a.slice(0,8)+"…"+a.slice(-4) : "?";
 const sideBadge = o => {
   const s=(o||"").toString().toLowerCase();
@@ -447,12 +448,13 @@ async function loadWallet(){
     const pl=p.pnl;
     return '<tr><td class="title">'+(p.title||"")+(p.fills>1?' <span class="muted">(×'+p.fills+')</span>':'')+'</td>'+
       '<td>'+sideBadge(p.outcome)+'</td>'+
+      '<td class="muted" style="font-size:12px">'+ago(p.opened)+'</td>'+
       '<td class="num muted">'+(p.entry!=null?p.entry.toFixed(3):"—")+'</td>'+
       '<td class="num">'+(p.mark!=null?p.mark.toFixed(3):"—")+'</td>'+
       '<td class="num muted">'+money(p.cost)+'</td>'+
       '<td class="num '+cls(pl)+'">'+money(p.val)+'</td>'+
       '<td class="num '+cls(pl)+'">'+money(pl)+'</td></tr>';
-  }).join("") || '<tr><td colspan="7" class="empty">открытых позиций нет</td></tr>';
+  }).join("") || '<tr><td colspan="8" class="empty">открытых позиций нет</td></tr>';
   $("wclosed").innerHTML = (d.closed||[]).map(c=>{
     const res = c.result==="win" ? '<span class="tag YES">выигрыш</span>'
               : c.result==="lose" ? '<span class="tag NO">проигрыш</span>' : '<span class="muted">0</span>';
@@ -704,17 +706,26 @@ def api_wallet():
         mk = marks.get(p["token"])
         return p["qty"] * mk if (mk is not None and mk > 0) else p["cost"]
 
+    # время открытия: из поля opened, для старых позиций — самый ранний BUY из лога
+    first_buy = {}
+    for r in book["log"]:
+        if r.get("act") == "BUY" and (r.get("w", "") or "").lower() == addr:
+            k = (r.get("title", ""), r.get("out", ""))
+            t = r.get("t", 0)
+            if t and (k not in first_buy or t < first_buy[k]):
+                first_buy[k] = t
     positions = []
     for p in book["positions"].values():
         if (p.get("wallet", "") or "").lower() != addr:
             continue
         v = mark_val(p)
         entry = (p["cost"] / p["qty"]) if p.get("qty") else None
+        opened = p.get("opened") or first_buy.get(((p.get("title", "") or "")[:46], p.get("outcome", "")))
         positions.append({"title": p.get("title", ""), "outcome": p.get("outcome", ""),
                           "entry": round(entry, 4) if entry else None,
                           "mark": marks.get(p["token"]), "cost": round(p["cost"], 2),
                           "val": round(v, 2), "pnl": round(v - p["cost"], 2),
-                          "fills": p.get("fills", 1)})
+                          "fills": p.get("fills", 1), "opened": opened})
     positions.sort(key=lambda x: x["cost"], reverse=True)
 
     wl = [r for r in book["log"] if (r.get("w", "") or "").lower() == addr]

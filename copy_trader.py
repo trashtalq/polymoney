@@ -267,7 +267,7 @@ def _mirror_buy(book: dict, e: dict, per_trade: float, wallet: str) -> bool:
     else:
         book["positions"][key] = {"token": tok, "qty": qty, "cost": spend, "wallet": wallet,
                                   "cid": ev_cid(e), "title": ev_title(e), "outcome": ev_outcome(e),
-                                  "fills": 1}
+                                  "fills": 1, "opened": ev_ts(e)}
     book["cash"] -= spend
     book["n_copied"] += 1
     book["log"].append({"t": ev_ts(e), "w": wallet, "act": "BUY", "px": round(px, 4),
@@ -380,7 +380,8 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
     else:
         book["positions"][key] = {"token": tok, "qty": qty, "cost": spend,
                                   "wallet": wallet, "cid": ev_cid(e),
-                                  "title": ev_title(e), "outcome": ev_outcome(e), "fills": 1}
+                                  "title": ev_title(e), "outcome": ev_outcome(e),
+                                  "fills": 1, "opened": ev_ts(e)}
     book["cash"] -= spend
     book["n_copied"] += 1
     book["log"].append({"t": ev_ts(e), "w": wallet, "act": "BUY", "px": round(px, 4),
