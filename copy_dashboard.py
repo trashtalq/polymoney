@@ -17,7 +17,9 @@ copy_dashboard.py — ВЕБ-ДАШБОРД для бумажного копи (
 
 import argparse
 import copy
+import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -27,6 +29,17 @@ from flask import Flask, jsonify, request, Response
 import copy_trader as ct
 
 app = Flask(__name__)
+
+# Пароль на изменяющие действия (удаление кошелька). В репо хранится только ХЭШ, не сам пароль.
+# Можно переопределить на сервере через env ADMIN_PASS. По умолчанию — заданный пользователем.
+ADMIN_HASH = (hashlib.sha256(os.environ["ADMIN_PASS"].encode("utf-8")).hexdigest()
+              if os.environ.get("ADMIN_PASS")
+              else "a7a73bb77842473cec098b5635043d41654b66dff80475a9f6a6178b6b36ea34")
+
+
+def _auth_ok() -> bool:
+    return hashlib.sha256(request.headers.get("X-Auth", "").encode("utf-8")).hexdigest() == ADMIN_HASH
+
 
 _lock = threading.Lock()
 STATE = {
@@ -431,8 +444,13 @@ const flagBadge = f => f==="lead" ? '<span class="tag YES">лидер</span>'
 const addrLink = a => '<span class="addr clk" onclick="openWallet(\''+a+'\')">'+shortAddr(a)+'</span>';
 async function removeWallet(a){
   if(!confirm("Удалить кошелёк "+shortAddr(a)+"?\nКопирование новых сделок прекратится. Открытые позиции до-резолвятся сами.")) return;
+  let pw = localStorage.getItem("pw") || "";
+  if(!pw){ pw = prompt("Пароль:") || ""; if(!pw) return; localStorage.setItem("pw", pw); }
   try{
-    const r = await (await fetch("/api/remove_wallet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({wallet:a})})).json();
+    const resp = await fetch("/api/remove_wallet",{method:"POST",
+      headers:{"Content-Type":"application/json","X-Auth":pw},body:JSON.stringify({wallet:a})});
+    if(resp.status===401){ localStorage.removeItem("pw"); alert("Неверный пароль — попробуй ещё раз"); return; }
+    const r = await resp.json();
     if(!r.ok){ alert("Не удалось удалить: "+(r.error||"")); return; }
   }catch(e){ alert("Ошибка сети"); return; }
   tick();
@@ -829,6 +847,8 @@ def api_wallet():
 def api_remove_wallet():
     """Удалить кошелёк из watchlist (копирование новых сделок прекращается; открытые позиции
     до-резолвятся сами через независимый оракул). Файл watchlist перечитывается на лету."""
+    if not _auth_ok():
+        return jsonify({"ok": False, "error": "auth"}), 401
     addr = ((request.get_json(silent=True) or {}).get("wallet", "") or "").lower()
     if not addr:
         return jsonify({"ok": False, "error": "no wallet"}), 400
