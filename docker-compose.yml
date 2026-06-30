@@ -1,0 +1,15 @@
+services:
+  copy:
+    build: .
+    container_name: polymoney
+    restart: unless-stopped          # авто-рестарт при падении и после ребута сервера
+    environment:
+      DASH_HOST: "0.0.0.0"
+      DASH_PORT: "5000"
+      BANKROLL: "100000"
+      PER_TRADE: "100"
+      INTERVAL: "120"
+    ports:
+      - "127.0.0.1:5000:5000"        # наружу НЕ торчит: смотрим через SSH-туннель (безопасно)
+    volumes:
+      - .:/app                       # состояние (paper_book, watchlist, perf_history) живёт на хосте
