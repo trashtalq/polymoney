@@ -868,6 +868,50 @@ def api_remove_wallet():
     return jsonify({"ok": True, "removed": before - d["count"], "count": d["count"]})
 
 
+@app.route("/api/category")
+def api_category():
+    """PnL по категории рынков (kw=слово1,слово2). Реализ.(из лога) + нереализ.(по марку) + % на задействованное."""
+    kws = [k.strip().lower() for k in (request.args.get("kw", "")).split(",") if k.strip()]
+    if not kws:
+        return jsonify({"error": "no kw"}), 400
+    with _lock:
+        book = STATE["book"]
+        marks = dict(STATE["marks"])
+
+    def match(t):
+        t = (t or "").lower()
+        return any(k in t for k in kws)
+
+    def mval(p):
+        mk = marks.get(p["token"])
+        return p["qty"] * mk if (mk is not None and mk > 0) else p["cost"]
+
+    inv_open = val_open = 0.0
+    n_open = 0
+    for p in book["positions"].values():
+        if match(p.get("title")):
+            inv_open += p["cost"]
+            val_open += mval(p)
+            n_open += 1
+    spent = realized = 0.0
+    n_buy = n_close = 0
+    for r in book["log"]:
+        if not match(r.get("title")):
+            continue
+        if r.get("act") == "BUY":
+            spent += r.get("spend", 0) or 0
+            n_buy += 1
+        if "pnl" in r:
+            realized += r.get("pnl", 0) or 0
+            n_close += 1
+    unreal = val_open - inv_open
+    total = realized + unreal
+    return jsonify({"kw": kws, "n_buy": n_buy, "n_close": n_close, "n_open": n_open,
+                    "spent": round(spent, 2), "realized": round(realized, 2),
+                    "unrealized": round(unreal, 2), "total": round(total, 2),
+                    "pct_on_spent": round(total / spent * 100, 2) if spent else 0.0})
+
+
 def main():
     p = argparse.ArgumentParser(description="Веб-дашборд бумажного копи")
     p.add_argument("--wallets", help="адреса целей через запятую")
