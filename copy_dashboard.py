@@ -613,7 +613,7 @@ async function tick(){
     '<td class="title">'+(r.title||"")+'</td><td>'+v+'</td></tr>';}).join("")
     || '<tr><td colspan="6" class="empty">журнал пуст</td></tr>';
 }
-const REASON_LBL = {band:"цена у края", adverse:"догон от цели", avg_up:"догон вверх", cap:"потолок позиции"};
+const REASON_LBL = {band:"цена у края", adverse:"догон от цели", avg_up:"догон вверх", cap:"потолок позиции", sport:"футбол/спорт"};
 let skipOpen=false;
 function closeSkipped(){ skipOpen=false; $("modal").classList.remove("show"); }
 async function openSkipped(){

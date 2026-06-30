@@ -46,6 +46,22 @@ MAX_ADVERSE_MOVE = 0.06  # цена ушла от входа цели дальш
 # но по рыночной цене + слиппедж (реалистично). Адреса в lower-case.
 NO_FILTER_WALLETS = {"0xdacf9f8d0341fa3770fae5c7ccd9dcfed23e3c74"}
 
+# НЕ копируем ставки на футбол/спорт (даже у оставленных кошельков) — спорт дорого копировать.
+SPORT_MARKET_KW = (
+    "vs.", " vs ", "o/u", "over/under", "exact score", "both teams to score",
+    "win on 20", "1st half", "2nd half", "to score", "clean sheet", "corner",
+    "hat-trick", "hattrick", "yard box", "group stage", "round of 16",
+    "quarterfinal", "quarter-final", "semifinal", "semi-final", "knockout",
+    "world cup", "champions league", "premier league", "la liga", "bundesliga",
+    "serie a", "ligue 1", "uefa", "fifa", "copa ", "penalty", "red card",
+    "to win the match", "end in a draw", "to be relegated", "to qualify",
+)
+
+
+def _is_sport_market(title: str) -> bool:
+    t = (title or "").lower()
+    return any(k in t for k in SPORT_MARKET_KW)
+
 # --- Сайзинг по убеждённости: $per-trade = ПОТОЛОК НА ВХОД, вниз масштабируем по ставке цели ---
 SIZE_BY_CONVICTION = True
 MIN_SIZE_FRAC = 0.2      # не меньше 20% потолка ($20 при $100), иначе дребезг
@@ -231,6 +247,9 @@ def _record_skip(book: dict, e: dict, base: float, reason: str,
 # ----------------------------- ЗЕРКАЛЬНЫЕ операции (полная копия цели) -----------------------------
 def _mirror_buy(book: dict, e: dict, per_trade: float, wallet: str) -> bool:
     """Вход по цене ЦЕЛИ, без EV-фильтра/слиппеджа. Сайзинг и потолок позиции — как риск-слой."""
+    if _is_sport_market(ev_title(e)):                 # не копируем футбол/спорт
+        book["n_skipped"] = book.get("n_skipped", 0) + 1
+        return False
     px = ev_price(e)
     if not (0 < px < 1):
         return False
@@ -335,6 +354,8 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
     _th = book.setdefault("thold", {})
     _k = f"{wallet}|{ev_token(e)}"
     _th[_k] = _th.get(_k, 0.0) + _f(e, "size")
+    if _is_sport_market(ev_title(e)):                  # не копируем футбол/спорт (даже у no-filter)
+        return _record_skip(book, e, base, "sport", per_trade, slippage, wallet)
     nf = (wallet or "").lower() in NO_FILTER_WALLETS   # персональное отключение EV-фильтра
     # --- фильтр копируемости: пропускаем сделки с разрушенным EV (кроме no-filter кошельков) ---
     their = ev_price(e)
