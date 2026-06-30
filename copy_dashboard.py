@@ -141,6 +141,19 @@ def compute_stats(book: dict, marks: dict) -> dict:
             "flag": flag,
             "source": sources.get(w, "—"),
         })
+    # ---- PnL «за сегодня»: дневной базовый снимок (PnL на начало суток сервера, сброс в полночь) ----
+    today_str = time.strftime("%Y-%m-%d")
+    cur_total_pnl = round(pnl, 2)
+    base = book.get("day_baseline")
+    if not base or base.get("date") != today_str:             # новый день -> фиксируем точку отсчёта
+        base = {"date": today_str, "total_pnl": cur_total_pnl,
+                "per_wallet": {w["wallet"]: w["total"] for w in per_wallet}}
+        book["day_baseline"] = base
+    pnl_today = round(cur_total_pnl - base.get("total_pnl", cur_total_pnl), 2)
+    bw = base.get("per_wallet", {})
+    for w in per_wallet:                                       # сколько кошелёк прибавил/потерял с начала суток
+        w["today"] = round(w["total"] - bw.get(w["wallet"], w["total"]), 2)
+
     wlset = get_watchlist()
     if wlset:                                                  # скрываем удалённые из рейтинга (позиции их доживут сами)
         per_wallet = [w for w in per_wallet if w["wallet"].lower() in wlset]
@@ -184,6 +197,7 @@ def compute_stats(book: dict, marks: dict) -> dict:
         "open_val": round(open_val, 2),
         "total": round(total, 2),
         "pnl": round(pnl, 2),
+        "pnl_today": pnl_today,
         "roi": roi,
         "n_copied": book["n_copied"],
         "n_skipped": book.get("n_skipped", 0),
@@ -351,7 +365,7 @@ PAGE = r"""<!doctype html>
 
   <div class="sec">По кошелькам — авто-ранжирование по форвардному PnL</div>
   <table>
-    <thead><tr><th>#</th><th>Кошелёк</th><th>Источник</th><th>Скопир.</th><th>Задейств.</th><th>Закрыто</th><th>Открыто</th><th>Винрейт</th><th>Реализ. PnL</th><th>Нереализ. PnL</th><th>PnL итого</th><th>Статус</th><th></th></tr></thead>
+    <thead><tr><th>#</th><th>Кошелёк</th><th>Источник</th><th>Скопир.</th><th>Задейств.</th><th>Закрыто</th><th>Открыто</th><th>Винрейт</th><th>Реализ. PnL</th><th>Нереализ. PnL</th><th>PnL итого</th><th>За сегодня</th><th>Статус</th><th></th></tr></thead>
     <tbody id="wallets"></tbody>
   </table>
 
@@ -561,6 +575,7 @@ async function tick(){
   $("hero").innerHTML = money(d.pnl)+'<span class="sub">итого PnL · реализ. '+money(d.realized)+' · '+(d.roi*100).toFixed(1)+'% от банкролла</span>';
 
   $("cards").innerHTML = [
+    ["PnL за сегодня", money(d.pnl_today||0), cls(d.pnl_today||0)],
     ["Реализовано (закрытые)", money(d.realized), cls(d.realized)],
     ["Нереализ. PnL (открытые)", money(d.unrealized), cls(d.unrealized)],
     ["Открытых позиций", d.n_open, ""],
@@ -586,9 +601,10 @@ async function tick(){
     '<td class="num '+cls(w.realized)+'">'+money(w.realized)+'</td>'+
     '<td class="num '+cls(w.unrealized)+'">'+money(w.unrealized)+'</td>'+
     '<td class="num '+cls(w.total)+'">'+money(w.total)+(w.spent>0?' <span class="muted">('+(w.total/w.spent>=0?'+':'')+(w.total/w.spent*100).toFixed(0)+'%)</span>':'')+'</td>'+
+    '<td class="num '+cls(w.today||0)+'">'+(w.today!=null?money(w.today):'—')+'</td>'+
     '<td>'+flagBadge(w.flag)+'</td>'+
     '<td><span class="del" title="удалить кошелёк" onclick="removeWallet(\''+w.wallet+'\')">✕</span></td></tr>').join("")
-    || '<tr><td colspan="13" class="empty">пока ничего не скопировано — ждём первые сделки целей</td></tr>';
+    || '<tr><td colspan="14" class="empty">пока ничего не скопировано — ждём первые сделки целей</td></tr>';
 
   $("open").innerHTML = (d.open_positions||[]).map(p=>{
     const pl = p.pnl!=null ? p.pnl : (p.val-p.cost);
