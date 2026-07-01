@@ -41,6 +41,8 @@ MIN_MARKETS = 6          # минимум рынков с позицией дл�
 BOOT_N = 1000
 LIVE_DAYS = 14           # живость: последняя сделка не старше
 TOP_ADD = 25             # столько лучших добавляем за прогон
+MAX_MED_HOLD_DAYS = 10   # медианное время вход->резолв: капитал должен ОБОРАЧИВАТЬСЯ (дни, не месяцы)
+MAX_TRADES_PER_DAY = 100 # гиперактивные (погодные брекеты по 1к позиций/день и т.п.) — не берём
 
 LOGF = Path("market_first_scan.log")
 
@@ -118,8 +120,8 @@ def scan() -> dict:
         if not wm:
             continue
         tokm, outm = wm
-        # покупки по кошелькам: stance = токен с макс $ покупок
-        acc: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: [0.0, 0.0]))  # w->tok->[usd,qty]
+        # покупки по кошелькам: stance = токен с макс $ покупок; ts — $-взвешенное время входа
+        acc: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: [0.0, 0.0, 0.0]))  # w->tok->[usd,qty,usd*ts]
         try:
             trades = api.trades_for_market(m["cid"], max_trades=TRADES_PER_MARKET)
         except Exception as ex:  # noqa: BLE001
@@ -136,8 +138,9 @@ def scan() -> dict:
             a = acc[w][tok]
             a[0] += px * sz
             a[1] += sz
+            a[2] += px * sz * wa._f(t, "timestamp")
         for w, toks in acc.items():
-            tok, (usd, qty) = max(toks.items(), key=lambda kv: kv[1][0])
+            tok, (usd, qty, usdts) = max(toks.items(), key=lambda kv: kv[1][0])
             if usd < MIN_STANCE_USD or qty <= 0:
                 continue
             val = tokm.get(tok)
@@ -147,17 +150,21 @@ def scan() -> dict:
             if not (ct.MIN_ENTRY_PRICE <= entry <= ct.MAX_ENTRY_PRICE):
                 continue                               # наш band-фильтр это не скопировал бы
             pnl = NOTIONAL * (val / entry - 1.0) if val > 0 else -NOTIONAL
-            sims[w].append(round(pnl, 3))
+            hold = max(0.0, (m["ts"] - usdts / usd) / 86400)   # дней от $-среднего входа до резолва
+            sims[w].append((round(pnl, 3), round(hold, 1)))
         done += 1
         if done % 25 == 0:
             log(f"рынки {done}/{len(mkts)}, кошельков в пуле {len(sims)}")
 
-    # скоринг: bootstrap-CI среднего PnL по рынкам
+    # скоринг: bootstrap-CI среднего PnL по рынкам + медианное время удержания (оборот капитала)
     rows = []
-    for w, pl in sims.items():
-        n = len(pl)
+    for w, recs in sims.items():
+        n = len(recs)
         if n < MIN_MARKETS:
             continue
+        pl = [p for p, _h in recs]
+        holds = sorted(h for _p, h in recs)
+        med_hold = holds[n // 2]
         mean = sum(pl) / n
         boots = []
         for _ in range(BOOT_N):
@@ -167,7 +174,7 @@ def scan() -> dict:
         ci_low = boots[int(0.05 * BOOT_N)]
         rows.append({"wallet": w, "n_markets": n, "wins": sum(1 for x in pl if x > 0),
                      "sim_pnl": round(sum(pl), 2), "sim_mean": round(mean, 3),
-                     "ci_low": round(ci_low, 3)})
+                     "ci_low": round(ci_low, 3), "med_hold_days": med_hold})
     rows.sort(key=lambda r: r["ci_low"], reverse=True)
     Path("market_scan_results.json").write_text(
         json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -176,27 +183,23 @@ def scan() -> dict:
     return {"rows": rows, "session": s}
 
 
-def is_live(s: requests.Session, addr: str) -> bool:
-    try:
-        evs = s.get(f"{DATA}/activity", params={"user": addr, "limit": 1, "sortBy": "TIMESTAMP",
-                    "sortDirection": "DESC"}, timeout=15).json() or []
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(evs) and (time.time() - int(evs[0].get("timestamp", 0))) <= LIVE_DAYS * 86400
-
-
-def sport_majority(s: requests.Session, addr: str) -> bool:
-    """Большинство реальных сделок — спорт/погода -> не берём (копир их режет, толку ноль)."""
+def wallet_profile(s: requests.Session, addr: str) -> dict:
+    """Один запрос activity(150) -> живость + доля спорт/погода + темп сделок.
+    Гиперактивные (погодные брекеты по сотни-тысячи позиций в день) отсеиваются по темпу."""
     try:
         evs = s.get(f"{DATA}/activity", params={"user": addr, "limit": 150, "sortBy": "TIMESTAMP",
                     "sortDirection": "DESC"}, timeout=15).json() or []
     except Exception:  # noqa: BLE001
-        return False
+        return {"live": False, "blocked_share": 0.0, "trades_per_day": 0.0}
     tr = [e for e in evs if (e.get("type", "").upper() == "TRADE")]
-    if len(tr) < 10:
-        return False
-    bl = sum(1 for e in tr if ct._blocked_reason(e.get("title") or ""))
-    return bl / len(tr) >= 0.6
+    live = bool(evs) and (time.time() - int(evs[0].get("timestamp", 0))) <= LIVE_DAYS * 86400
+    blocked = (sum(1 for e in tr if ct._blocked_reason(e.get("title") or "")) / len(tr)) if len(tr) >= 10 else 0.0
+    rate = 0.0
+    if len(tr) >= 30:
+        span = int(tr[0].get("timestamp", 0)) - int(tr[-1].get("timestamp", 0))
+        if span > 3600:                                # окно меньше часа не экстраполируем
+            rate = len(tr) / (span / 86400)
+    return {"live": live, "blocked_share": blocked, "trades_per_day": round(rate, 1)}
 
 
 def main():
@@ -205,21 +208,30 @@ def main():
     res = scan()
     rows, s = res["rows"], res["session"]
 
-    # гейты: ci_low>0, винрейт>=50%, не в списке, живой, не спорт-мажоритарный
+    # гейты: ci_low>0, винрейт>=50%, быстрый оборот (медиана вход->резолв в ДНЯХ), не в списке,
+    # живой, не спорт/погода-мажоритарный, не гиперактивный (погодные брекеты 1к позиций/день)
     adds = []
     for r in rows:
         if len(adds) >= TOP_ADD:
             break
         if r["ci_low"] <= 0 or r["wins"] / r["n_markets"] < 0.5 or r["wallet"] in have:
             continue
-        if not is_live(s, r["wallet"]):
+        if r["med_hold_days"] > MAX_MED_HOLD_DAYS:
+            log(f"  {r['wallet'][:10]}… медленный оборот (медиана {r['med_hold_days']}д) — мимо")
             continue
-        if sport_majority(s, r["wallet"]):
-            log(f"  {r['wallet'][:10]}… спорт-мажоритарный — мимо")
+        p = wallet_profile(s, r["wallet"])
+        if not p["live"]:
+            continue
+        if p["blocked_share"] >= 0.6:
+            log(f"  {r['wallet'][:10]}… спорт/погода-мажоритарный ({p['blocked_share']:.0%}) — мимо")
+            continue
+        if p["trades_per_day"] > MAX_TRADES_PER_DAY:
+            log(f"  {r['wallet'][:10]}… гиперактивный ({p['trades_per_day']}/день) — мимо")
             continue
         adds.append(r)
         log(f"  + {r['wallet'][:10]}… рынков {r['n_markets']}, винрейт "
-            f"{100 * r['wins'] // r['n_markets']}%, sim ${r['sim_pnl']}, ci_low {r['ci_low']}")
+            f"{100 * r['wins'] // r['n_markets']}%, sim ${r['sim_pnl']}, ci_low {r['ci_low']}, "
+            f"оборот {r['med_hold_days']}д, темп {p['trades_per_day']}/д")
         time.sleep(0.3)
     Path("market_scan_adds.json").write_text(
         json.dumps(adds, ensure_ascii=False, indent=1), encoding="utf-8")

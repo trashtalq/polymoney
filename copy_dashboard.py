@@ -195,12 +195,14 @@ def compute_stats(book: dict, marks: dict) -> dict:
             if rc > 0 and c > 0:
                 r_unreal += (mark_val(p) - c) * min(1.0, rc / c)
         n_att = ra.get("taken", 0) + ra.get("missed", 0)
+        first_r = next((r.get("t", 0) for r in book["log"] if "r" in r), 0)   # старт реал-леджера
         real = {"base": ra.get("base"), "cash": round(ra.get("cash", 0.0), 2),
                 "realized": round(ra.get("realized", 0.0), 2), "unrealized": round(r_unreal, 2),
                 "pnl": round(ra.get("realized", 0.0) + r_unreal, 2),
                 "taken": ra.get("taken", 0), "missed": ra.get("missed", 0),
                 "missed_pct": round(100.0 * ra.get("missed", 0) / n_att, 1) if n_att else 0.0,
-                "missed_spend": round(ra.get("missed_spend", 0.0), 2)}
+                "missed_spend": round(ra.get("missed_spend", 0.0), 2),
+                "age_days": round((time.time() - first_r) / 86400, 1) if first_r else 0.0}
 
     log = []
     for r in book["log"][-60:][::-1]:
@@ -229,6 +231,7 @@ def compute_stats(book: dict, marks: dict) -> dict:
         "n_copied": book["n_copied"],
         "n_skipped": book.get("n_skipped", 0),
         "n_open": len(book["positions"]),
+        "paused": bool(book.get("paused", False)),
         "topups": round(book.get("topups", 0.0), 2),
         "started": book["started"],
         "per_wallet": per_wallet,
@@ -345,6 +348,18 @@ PAGE = r"""<!doctype html>
   .status{color:var(--muted);font-size:12px;padding:6px 14px;border:1px solid var(--border);
           border-radius:999px;background:rgba(10,18,30,.55);backdrop-filter:blur(8px)}
   .status b{color:var(--accent);font-weight:700}
+  h1 .dot.hold{background:var(--amber);box-shadow:0 0 10px var(--amber),0 0 22px var(--amber);animation:pulse 2.4s infinite}
+  .btn{cursor:pointer;font:inherit;font-size:12px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;
+       color:var(--amber);background:rgba(255,194,61,.08);border:1px solid rgba(255,194,61,.4);
+       border-radius:999px;padding:7px 16px;transition:all .15s}
+  .btn:hover{background:rgba(255,194,61,.17);box-shadow:0 0 14px rgba(255,194,61,.3)}
+  .btn.go{color:var(--green);border-color:rgba(43,245,176,.45);background:rgba(43,245,176,.08)}
+  .btn.go:hover{background:rgba(43,245,176,.17);box-shadow:0 0 14px rgba(43,245,176,.35)}
+  .pausebar{display:none;margin:14px 0 0;padding:9px 16px;border-radius:11px;font-size:12px;
+       letter-spacing:1.2px;text-transform:uppercase;color:var(--amber);font-weight:800;
+       background:rgba(255,194,61,.07);border:1px solid rgba(255,194,61,.35);
+       box-shadow:0 0 18px rgba(255,194,61,.10)}
+  .pausebar.show{display:block}
   .heroLabel{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:2.5px;margin-bottom:6px}
   .hero{font-size:58px;font-weight:800;letter-spacing:-2px;line-height:1;margin:0}
   .hero.pos{background:linear-gradient(100deg,#8dffe0,var(--green) 45%,var(--accent));
@@ -458,12 +473,16 @@ PAGE = r"""<!doctype html>
 <div class="wrap">
   <header>
     <h1><span id="dot" class="dot"></span>POLYMONEY <span class="h1sub">· копи-терминал</span></h1>
-    <div class="status" id="status">подключение…</div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button id="pauseBtn" class="btn" onclick="togglePause()" style="display:none">⏸ стоп копи</button>
+      <div class="status" id="status">подключение…</div>
+    </div>
   </header>
 
   <div class="heroLabel">Итого PnL — форвард</div>
   <div class="hero num" id="hero">—</div>
   <div class="chips" id="chips"></div>
+  <div class="pausebar" id="pausebar">⏸ Копирование остановлено — новые входы не берутся; выходы, резолвы и оценка позиций работают</div>
   <div class="err" id="err"></div>
 
   <div class="cards" id="cards"></div>
@@ -576,6 +595,23 @@ async function removeWallet(a){
     if(resp.status===401){ localStorage.removeItem("pw"); alert("Неверный пароль — попробуй ещё раз"); return; }
     const r = await resp.json();
     if(!r.ok){ alert("Не удалось удалить: "+(r.error||"")); return; }
+  }catch(e){ alert("Ошибка сети"); return; }
+  tick();
+}
+let _paused=false;
+async function togglePause(){
+  const msg = _paused
+    ? "Запустить копирование новых сделок?"
+    : "Остановить копирование?\nНовые входы копироваться НЕ будут. Выходы целей, резолвы и оценка открытых позиций продолжат работать.";
+  if(!confirm(msg)) return;
+  let pw = localStorage.getItem("pw") || "";
+  if(!pw){ pw = prompt("Пароль:") || ""; if(!pw) return; localStorage.setItem("pw", pw); }
+  try{
+    const resp = await fetch("/api/pause",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({pw:pw, paused:!_paused})});
+    if(resp.status===401){ localStorage.removeItem("pw"); alert("Неверный пароль — попробуй ещё раз"); return; }
+    const r = await resp.json();
+    if(!r.ok){ alert("Не удалось: "+(r.error||"")); return; }
   }catch(e){ alert("Ошибка сети"); return; }
   tick();
 }
@@ -699,8 +735,16 @@ async function tick(){
   try{ d=await (await fetch("/api/state")).json(); }
   catch(e){ $("status").innerHTML="сервер недоступен"; return; }
   const st=d.status||{};
-  $("dot").className="dot"+(st.polling?" live":(st.last_poll?" live":""));
-  $("status").innerHTML='целей <b>'+(st.wallets||0)+'</b> · опрос <b>'+ago(st.last_poll)+'</b> · циклов <b>'+(st.n_polls||0)+'</b>'+(st.polling?' · <span class="muted">опрашиваю…</span>':'');
+  _paused = !!d.paused;
+  $("dot").className="dot"+(_paused?" hold":(st.polling||st.last_poll?" live":""));
+  $("status").innerHTML='целей <b>'+(st.wallets||0)+'</b> · опрос <b>'+ago(st.last_poll)+'</b> · циклов <b>'+(st.n_polls||0)+'</b>'
+    +(st.polling?' · <span class="muted">опрашиваю…</span>':'')
+    +(_paused?' · <span style="color:var(--amber);font-weight:700">ПАУЗА</span>':'');
+  const pb=$("pauseBtn");
+  pb.style.display="";
+  pb.className="btn"+(_paused?" go":"");
+  pb.textContent=_paused?"▶ запустить копи":"⏸ стоп копи";
+  $("pausebar").className="pausebar"+(_paused?" show":"");
   $("err").textContent = st.error ? ("ошибка опроса: "+st.error) : "";
 
   $("hero").className="hero num "+cls(d.pnl);
@@ -730,6 +774,20 @@ async function tick(){
                            money(d.real.pnl||0), cls(d.real.pnl||0), "", "vio"]);
     cardsArr.push(["Пропущено входов (реал)", (d.real.missed||0)+" ("+(d.real.missed_pct||0)+"%)",
                    (d.real.missed_pct>25?"neg":""), "", "vio"]);
+    // прогноз до $2k/мес: месячный темп реал-леджера -> сложный процент (в реальных $, бумага = реал×10)
+    const ad = d.real.age_days||0;
+    if(ad >= 5 && d.real.base > 0){
+      const rate = (d.real.pnl/d.real.base)*(30/ad);          // темп, %/мес
+      let vtxt="—", vcls="";
+      if(rate > 0.005){
+        const months = Math.log((20000/rate)/d.real.base)/Math.log(1+rate);
+        vtxt = months<=0 ? "уже!" : Math.ceil(months)+" мес";
+        vcls = "pos";
+      } else { vtxt = "темп ≤ 0"; vcls = "neg"; }
+      cardsArr.push(["До $2k/мес (темп "+(rate*100).toFixed(1)+"%/мес)", vtxt, vcls, "", "feat"]);
+    } else if(d.real.base > 0){
+      cardsArr.push(["До $2k/мес", "копим статистику ("+ad+"д/5д)", "", "", "feat"]);
+    }
   }
   $("cards").innerHTML = cardsArr.map(c=>'<div class="card'+(c[4]?' '+c[4]:'')+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v num '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+'</div>').join("");
 
@@ -1066,6 +1124,25 @@ def api_rescale():
         except Exception:  # noqa: BLE001
             pass
     return jsonify({"ok": True, **res})
+
+
+@app.route("/api/pause", methods=["POST"])
+def api_pause():
+    """Стоп/старт копирования (пароль в теле): {pw, paused: true|false}.
+    Пауза = новые ВХОДЫ не копируются; выходы целей, резолвы и оценка позиций работают.
+    Флаг живёт в книге -> переживает рестарты контейнера."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    with _lock:
+        STATE["book"]["paused"] = bool(data.get("paused"))
+        STATE["book_ver"] += 1          # снимок в полёте у poll_loop устарел — не даём затереть флаг
+        try:
+            ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
+        except Exception:  # noqa: BLE001
+            pass
+        paused = STATE["book"]["paused"]
+    return jsonify({"ok": True, "paused": paused})
 
 
 @app.route("/api/add_wallet", methods=["POST"])

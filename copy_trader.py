@@ -610,6 +610,8 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
     _th = book.setdefault("thold", {})
     _k = f"{wallet}|{ev_token(e)}"
     _th[_k] = _th.get(_k, 0.0) + _f(e, "size")
+    if book.get("paused"):                              # ⏸ копирование остановлено кнопкой: новые входы
+        return False                                    # не берём; выходы/резолвы/оценка работают дальше
     _br = _blocked_reason(ev_title(e))                  # не копируем футбол/спорт/погоду (даже у no-filter)
     if _br:
         return _record_skip(book, e, base, _br, per_trade, slippage, wallet)
