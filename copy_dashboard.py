@@ -142,16 +142,18 @@ def compute_stats(book: dict, marks: dict) -> dict:
             "flag": flag,
             "source": sources.get(w, "—"),
         })
-    # ---- PnL «за сегодня»: дневной базовый снимок (PnL на начало суток сервера, сброс в полночь) ----
+    # ---- PnL «за сегодня»: ЕДИНЫЙ дневной снимок ПО КОШЕЛЬКАМ (сброс в полночь сервера) ----
+    # Храним ТОЛЬКО пер-кошельковый срез на начало суток. Карточку считаем как сумму «сегодня»
+    # по видимым кошелькам — тогда верх и таблица всегда сходятся, и удаление кошелька всегда
+    # двигает карточку ровно на его дневной вклад. Отдельный total_pnl-скаляр держать нельзя:
+    # при добавлении кошелька после полуночи он расходится с суммой по кошелькам (был баг).
     today_str = time.strftime("%Y-%m-%d")
-    cur_total_pnl = round(pnl, 2)
     base = book.get("day_baseline")
     if not base or base.get("date") != today_str:             # новый день -> фиксируем точку отсчёта
-        base = {"date": today_str, "total_pnl": cur_total_pnl,
+        base = {"date": today_str,
                 "per_wallet": {w["wallet"]: w["total"] for w in per_wallet}}
         book["day_baseline"] = base
-    pnl_today = round(cur_total_pnl - base.get("total_pnl", cur_total_pnl), 2)
-    bw = base.get("per_wallet", {})
+    bw = base.setdefault("per_wallet", {})
     for w in per_wallet:                                       # сколько кошелёк прибавил/потерял с начала суток
         w["today"] = round(w["total"] - bw.get(w["wallet"], w["total"]), 2)
 
@@ -159,6 +161,7 @@ def compute_stats(book: dict, marks: dict) -> dict:
     if wlset:                                                  # скрываем удалённые из рейтинга (позиции их доживут сами)
         per_wallet = [w for w in per_wallet if w["wallet"].lower() in wlset]
     per_wallet.sort(key=lambda x: x["total"], reverse=True)   # авто-ранжирование по форвардному PnL
+    pnl_today = round(sum(w["today"] for w in per_wallet), 2)  # карточка = сумма «сегодня» видимых кошельков
 
     positions = sorted(book["positions"].values(), key=lambda p: p["cost"], reverse=True)
     open_list = []

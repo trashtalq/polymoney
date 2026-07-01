@@ -124,12 +124,12 @@ def purge_wallet(book: dict, wallet: str) -> dict:
     book["topups"] = round(topups, 2)
     book["bankroll"] = round(base + topups, 2)
     book["cash"] = round(base + topups + realized - invested, 2)
-    # «сегодня»: сдвигаем базовую точку на вклад УДАЛЯЕМОГО кошелька на момент полуночи, а не
-    # сбрасываем всю базу — иначе «сегодня» остальных кошельков тоже занулилось бы задаром.
+    # «сегодня»: просто убираем удаляемый кошелёк из дневного снимка. Карточка считается как сумма
+    # «сегодня» по видимым кошелькам (см. compute_stats), поэтому исчезновение строки автоматически
+    # уменьшает карточку ровно на его дневной вклад — «сегодня» остальных не трогаем.
     db = book.get("day_baseline")
     if db:
-        contrib_mid = db.get("per_wallet", {}).pop(addr, 0.0)
-        db["total_pnl"] = round(db.get("total_pnl", 0.0) - contrib_mid, 2)
+        db.get("per_wallet", {}).pop(addr, None)
     return {"removed_positions": len(removed), "positions_left": len(book["positions"]),
             "realized": book["realized"], "bankroll": book["bankroll"],
             "cash": book["cash"], "topups": book["topups"]}
