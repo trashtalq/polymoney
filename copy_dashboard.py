@@ -301,120 +301,199 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Copy — живой PnL</title>
+<title>POLYMONEY — копи-терминал</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>⚡</text></svg>">
 <style>
   :root{
-    --bg:#05080d; --panel:#0a1019; --panel2:#0e1622; --border:#15323d;
-    --text:#cdeef0; --muted:#5d7c8a; --green:#2bf5b0; --red:#ff3b6b;
-    --accent:#06e5ff; --amber:#ffc23d;
+    --bg:#04060b; --panel:#0b1220; --panel2:#0e1728;
+    --border:rgba(70,130,160,.16); --border2:rgba(6,229,255,.30);
+    --text:#d7eef2; --muted:#5f7e8e; --dim:#3d5866;
+    --green:#2bf5b0; --red:#ff3b6b; --accent:#06e5ff; --violet:#8b7bff; --amber:#ffc23d;
   }
   *{box-sizing:border-box}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#16283a;border-radius:6px;border:2px solid #04060b}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::selection{background:rgba(6,229,255,.25)}
   body{margin:0;color:var(--text);font-size:14px;
-       font-family:ui-monospace,"JetBrains Mono",SFMono-Regular,Menlo,Consolas,monospace;
+       font-family:ui-monospace,"JetBrains Mono","Cascadia Code",SFMono-Regular,Menlo,Consolas,monospace;
        background:
-         radial-gradient(1200px 600px at 82% -12%, rgba(6,229,255,.07), transparent 60%),
-         radial-gradient(900px 520px at -5% 112%, rgba(255,59,107,.06), transparent 60%),
-         linear-gradient(180deg,#05080d,#04060a);
-       background-attachment:fixed}
+         radial-gradient(1100px 560px at 85% -10%, rgba(6,229,255,.10), transparent 55%),
+         radial-gradient(900px 520px at -10% 18%, rgba(139,123,255,.07), transparent 55%),
+         radial-gradient(1000px 620px at 55% 115%, rgba(255,59,107,.06), transparent 60%),
+         linear-gradient(180deg,#05070d 0%,#03050a 100%);
+       background-attachment:fixed;min-height:100vh}
+  body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+       background-image:linear-gradient(rgba(95,126,142,.05) 1px,transparent 1px),
+                        linear-gradient(90deg,rgba(95,126,142,.05) 1px,transparent 1px);
+       background-size:44px 44px;
+       -webkit-mask-image:radial-gradient(1200px 780px at 50% 0%,#000 25%,transparent 100%);
+       mask-image:radial-gradient(1200px 780px at 50% 0%,#000 25%,transparent 100%)}
   body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:9;
-       background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.16) 2px 3px);opacity:.4}
+       background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.10) 2px 3px);opacity:.35}
   .num{font-variant-numeric:tabular-nums}
-  .wrap{max-width:1100px;margin:0 auto;padding:22px 18px 60px;position:relative;z-index:1}
-  header{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:6px}
-  h1{font-size:16px;font-weight:700;letter-spacing:1.5px;margin:0;text-transform:uppercase;
-     color:var(--accent);text-shadow:0 0 10px rgba(6,229,255,.55)}
-  h1 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:8px;vertical-align:middle}
-  h1 .dot.live{background:var(--green);box-shadow:0 0 10px var(--green),0 0 22px var(--green);animation:pulse 1.6s infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-  .status{color:var(--muted);font-size:12px}
+  .wrap{max-width:1160px;margin:0 auto;padding:24px 20px 70px;position:relative;z-index:1}
+  header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:18px}
+  h1{font-size:15px;font-weight:800;letter-spacing:3px;margin:0;text-transform:uppercase;
+     background:linear-gradient(90deg,#7ff3ff,var(--accent) 55%,#4aa9ff);
+     -webkit-background-clip:text;background-clip:text;color:transparent;
+     filter:drop-shadow(0 0 12px rgba(6,229,255,.35))}
+  h1 .h1sub{font-weight:500;letter-spacing:1px;font-size:11px;color:var(--muted);-webkit-text-fill-color:var(--muted)}
+  h1 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--dim);margin-right:10px;vertical-align:middle}
+  h1 .dot.live{background:var(--green);box-shadow:0 0 10px var(--green),0 0 24px var(--green);animation:pulse 1.6s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .status{color:var(--muted);font-size:12px;padding:6px 14px;border:1px solid var(--border);
+          border-radius:999px;background:rgba(10,18,30,.55);backdrop-filter:blur(8px)}
   .status b{color:var(--accent);font-weight:700}
-  .hero{font-size:42px;font-weight:700;margin:10px 0 2px;letter-spacing:-.5px;text-shadow:0 0 20px currentColor}
-  .hero .sub{font-size:13px;color:var(--muted);margin-left:10px;font-weight:400;text-shadow:none}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:18px 0}
-  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--border);
-        border-radius:8px;padding:13px 15px;position:relative;overflow:hidden}
-  .card::before{content:"";position:absolute;left:0;top:0;height:100%;width:2px;background:var(--accent);
-        opacity:.7;box-shadow:0 0 10px var(--accent)}
-  .card .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1px}
-  .card .v{font-size:22px;font-weight:700;margin-top:5px}
-  .sec{margin:26px 0 10px;font-size:12px;color:var(--accent);text-transform:uppercase;letter-spacing:2px;
-       border-left:3px solid var(--accent);padding-left:9px;text-shadow:0 0 8px rgba(6,229,255,.4)}
-  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden}
-  th,td{padding:10px 13px;text-align:right;border-bottom:1px solid var(--border)}
-  th:first-child,td:first-child{text-align:left}
-  th{color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:1px;font-weight:700;
-     background:var(--panel2);border-bottom:1px solid var(--accent)}
-  tr:last-child td{border-bottom:none}
-  tbody tr:hover{background:rgba(6,229,255,.06)}
-  .pos{color:var(--green);text-shadow:0 0 7px rgba(43,245,176,.45)}
-  .neg{color:var(--red);text-shadow:0 0 7px rgba(255,59,107,.45)} .zero{color:var(--muted)}
-  .addr{font-family:ui-monospace,monospace;color:var(--accent);font-size:12px}
-  .addr.clk{cursor:pointer;text-decoration:underline dotted}
-  .addr.clk:hover{color:#fff}
-  .del{cursor:pointer;color:var(--muted);font-weight:700;padding:0 6px;border-radius:5px}
-  .del:hover{color:#fff;background:rgba(255,59,107,.25)}
-  .title{color:var(--text);max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;font-weight:600}
-  .tag.BUY{background:rgba(88,166,255,.15);color:var(--accent)}
-  .tag.SELL{background:rgba(210,153,34,.15);color:var(--amber)}
-  .tag.REDEEM,.tag.SETTLE{background:rgba(63,185,80,.15);color:var(--green)}
-  .tag.YES{background:rgba(63,185,80,.15);color:var(--green)}
-  .tag.NO{background:rgba(248,81,73,.15);color:var(--red)}
-  .empty{color:var(--muted);padding:18px 4px;font-style:italic}
-  .spark{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px}
-  .muted{color:var(--muted)} .err{color:var(--red);font-size:12px;margin-top:6px}
-  .mono{font-family:ui-monospace,monospace}
-  .card.clickable{cursor:pointer;transition:border-color .15s,transform .05s}
+  .heroLabel{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:2.5px;margin-bottom:6px}
+  .hero{font-size:58px;font-weight:800;letter-spacing:-2px;line-height:1;margin:0}
+  .hero.pos{background:linear-gradient(100deg,#8dffe0,var(--green) 45%,var(--accent));
+            -webkit-background-clip:text;background-clip:text;color:transparent;
+            filter:drop-shadow(0 0 26px rgba(43,245,176,.30))}
+  .hero.neg{background:linear-gradient(100deg,#ff9db3,var(--red) 50%,#ff7b4f);
+            -webkit-background-clip:text;background-clip:text;color:transparent;
+            filter:drop-shadow(0 0 26px rgba(255,59,107,.30))}
+  .hero.zero{color:var(--muted)}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .chip{padding:4px 12px;border-radius:999px;border:1px solid var(--border);
+        background:rgba(10,18,30,.55);font-size:12px;color:var(--muted)}
+  .chip b{color:var(--text);font-weight:700}
+  .chip.pos b{color:var(--green)} .chip.neg b{color:var(--red)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin:22px 0}
+  .card{position:relative;border-radius:14px;padding:14px 16px;overflow:hidden;
+        background:linear-gradient(160deg,rgba(17,27,44,.92),rgba(9,15,26,.92));
+        border:1px solid var(--border);
+        box-shadow:0 10px 28px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.035);
+        transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease}
+  .card:hover{transform:translateY(-2px);border-color:var(--border2);
+        box-shadow:0 14px 34px rgba(0,0,0,.45),0 0 20px rgba(6,229,255,.08)}
+  .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+        border-radius:14px 0 0 14px;background:linear-gradient(180deg,var(--accent),transparent);opacity:.75}
+  .card.feat::before{background:linear-gradient(180deg,var(--green),var(--accent))}
+  .card.vio::before{background:linear-gradient(180deg,var(--violet),transparent)}
+  .card.feat{border-color:rgba(43,245,176,.28)}
+  .card .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1.2px}
+  .card .v{font-size:23px;font-weight:800;margin-top:6px;letter-spacing:-.5px}
+  .card .v.pos{text-shadow:0 0 14px rgba(43,245,176,.35)}
+  .card .v.neg{text-shadow:0 0 14px rgba(255,59,107,.35)}
+  .card.clickable{cursor:pointer}
   .card.clickable:hover{border-color:var(--accent)}
-  .card .hint{color:var(--accent);font-size:10px;margin-top:6px;letter-spacing:.3px}
-  .modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;padding:30px 16px;overflow:auto}
+  .card .hint{color:var(--accent);font-size:10px;margin-top:7px;letter-spacing:.4px;opacity:.85}
+  .sec{display:flex;align-items:center;gap:11px;margin:32px 0 12px;font-size:12px;
+       letter-spacing:2.5px;text-transform:uppercase;color:var(--accent);
+       text-shadow:0 0 10px rgba(6,229,255,.35)}
+  .sec::before{content:"";width:16px;height:3px;border-radius:2px;flex:none;
+       background:linear-gradient(90deg,var(--accent),transparent);box-shadow:0 0 8px var(--accent)}
+  .sec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,rgba(6,229,255,.22),transparent)}
+  .tblwrap{border:1px solid var(--border);border-radius:14px;overflow:auto;
+       background:linear-gradient(180deg,rgba(14,23,38,.78),rgba(9,15,26,.85));
+       box-shadow:0 10px 28px rgba(0,0,0,.3)}
+  table{width:100%;border-collapse:collapse}
+  .tblwrap table{min-width:660px}
+  .tblwrap.wide table{min-width:1120px}
+  th,td{padding:10px 12px;text-align:right;border-bottom:1px solid rgba(70,130,160,.09);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left;padding-left:16px}
+  th{position:sticky;top:0;z-index:2;color:var(--muted);font-size:10px;text-transform:uppercase;
+     letter-spacing:1.2px;font-weight:700;background:rgba(10,17,29,.96);
+     border-bottom:1px solid var(--border2);backdrop-filter:blur(6px)}
+  tr:last-child td{border-bottom:none}
+  tbody tr{transition:background .12s ease}
+  tbody tr:nth-child(even){background:rgba(255,255,255,.014)}
+  tbody tr:hover{background:rgba(6,229,255,.055)}
+  tbody tr:hover td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
+  td.rank{color:var(--dim);font-size:12px;font-weight:700}
+  td.rank.r1{color:#ffd54d;text-shadow:0 0 10px rgba(255,213,77,.55)}
+  td.rank.r2{color:#d5e3ea;text-shadow:0 0 8px rgba(213,227,234,.35)}
+  td.rank.r3{color:#ffab73;text-shadow:0 0 8px rgba(255,171,115,.4)}
+  .wr{display:inline-flex;align-items:center;gap:7px}
+  .wr i{display:block;height:5px;border-radius:3px;min-width:3px}
+  .wr b{font-weight:700;font-size:12px}
+  .pos{color:var(--green);text-shadow:0 0 8px rgba(43,245,176,.4)}
+  .neg{color:var(--red);text-shadow:0 0 8px rgba(255,59,107,.4)} .zero{color:var(--muted)}
+  .addr{font-family:inherit;color:var(--accent);font-size:12px}
+  .addr.clk{cursor:pointer;border-bottom:1px dotted rgba(6,229,255,.5)}
+  .addr.clk:hover{color:#fff;border-bottom-color:#fff}
+  .del{cursor:pointer;color:var(--dim);font-weight:700;padding:2px 8px;border-radius:7px;transition:all .12s}
+  .del:hover{color:#fff;background:rgba(255,59,107,.3);box-shadow:0 0 10px rgba(255,59,107,.3)}
+  .title{color:var(--text);max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tag{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.3px}
+  .tag.BUY{background:rgba(6,229,255,.12);color:var(--accent);box-shadow:inset 0 0 0 1px rgba(6,229,255,.25)}
+  .tag.SELL{background:rgba(255,194,61,.12);color:var(--amber);box-shadow:inset 0 0 0 1px rgba(255,194,61,.25)}
+  .tag.REDEEM,.tag.SETTLE{background:rgba(43,245,176,.10);color:var(--green);box-shadow:inset 0 0 0 1px rgba(43,245,176,.22)}
+  .tag.YES{background:rgba(43,245,176,.10);color:var(--green);box-shadow:inset 0 0 0 1px rgba(43,245,176,.22)}
+  .tag.NO{background:rgba(255,59,107,.10);color:var(--red);box-shadow:inset 0 0 0 1px rgba(255,59,107,.22)}
+  .empty{color:var(--muted);padding:20px 6px;font-style:italic}
+  .spark{border:1px solid var(--border);border-radius:14px;padding:14px 14px 8px;
+       background:linear-gradient(180deg,rgba(14,23,38,.78),rgba(9,15,26,.85));
+       box-shadow:0 10px 28px rgba(0,0,0,.3)}
+  .spark svg .ping{transform-box:fill-box;transform-origin:center;animation:ping 2.2s ease-out infinite}
+  @keyframes ping{0%{transform:scale(1);opacity:.9}75%{transform:scale(3.4);opacity:0}100%{opacity:0}}
+  .muted{color:var(--muted)} .err{color:var(--red);font-size:12px;margin-top:6px}
+  .mono{font-family:inherit}
+  .modal-bg{display:none;position:fixed;inset:0;background:rgba(2,6,12,.72);z-index:50;
+       padding:34px 16px;overflow:auto;backdrop-filter:blur(5px)}
   .modal-bg.show{display:block}
-  .modal{max-width:1000px;margin:0 auto;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 20px}
+  .modal{max-width:1000px;margin:0 auto;border-radius:18px;padding:20px 22px;
+       background:linear-gradient(165deg,rgba(16,26,42,.97),rgba(8,13,23,.97));
+       border:1px solid var(--border2);box-shadow:0 30px 80px rgba(0,0,0,.6),0 0 40px rgba(6,229,255,.06);
+       animation:pop .16s ease}
+  @keyframes pop{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
+  .modal table{border:1px solid var(--border);border-radius:10px;overflow:hidden}
   .modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
   .modal-head b{font-size:15px}
-  .x{cursor:pointer;color:var(--muted);font-size:18px;padding:0 6px}
-  .x:hover{color:var(--text)}
-  .skipsum{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin:12px 0 16px}
-  .skipsum .b{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:9px 11px}
-  .skipsum .b .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.4px}
-  .skipsum .b .v{font-family:ui-monospace,monospace;font-size:18px;font-weight:600;margin-top:3px}
-  .rtag{display:inline-block;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:600;background:var(--panel2);color:var(--muted)}
+  .x{cursor:pointer;color:var(--muted);font-size:18px;padding:2px 9px;border-radius:8px}
+  .x:hover{color:var(--text);background:rgba(255,255,255,.06)}
+  .skipsum{display:grid;grid-template-columns:repeat(auto-fit,minmax(136px,1fr));gap:9px;margin:12px 0 16px}
+  .skipsum .b{background:rgba(14,23,40,.85);border:1px solid var(--border);border-radius:11px;padding:10px 12px}
+  .skipsum .b .k{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+  .skipsum .b .v{font-size:18px;font-weight:700;margin-top:4px}
+  .rtag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:600;
+       background:rgba(20,32,50,.8);color:var(--muted);box-shadow:inset 0 0 0 1px rgba(70,130,160,.18)}
   .st-win{color:var(--green)} .st-lose{color:var(--red)} .st-open{color:var(--muted)}
-  .gem{background:rgba(63,185,80,.10)}
+  .gem{background:rgba(43,245,176,.07)}
+  @media (max-width:640px){.hero{font-size:42px}.wrap{padding:16px 12px 50px}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1><span id="dot" class="dot"></span>Бумажное копи — живой PnL</h1>
+    <h1><span id="dot" class="dot"></span>POLYMONEY <span class="h1sub">· копи-терминал</span></h1>
     <div class="status" id="status">подключение…</div>
   </header>
 
-  <div class="hero num" id="hero">—<span class="sub" id="herosub"></span></div>
+  <div class="heroLabel">Итого PnL — форвард</div>
+  <div class="hero num" id="hero">—</div>
+  <div class="chips" id="chips"></div>
   <div class="err" id="err"></div>
 
   <div class="cards" id="cards"></div>
 
   <div class="sec">Кривая PnL</div>
-  <div class="spark"><svg id="spark" width="100%" height="90" preserveAspectRatio="none"></svg></div>
+  <div class="spark"><svg id="spark" width="100%" height="132" preserveAspectRatio="none"></svg></div>
 
   <div class="sec">По кошелькам — авто-ранжирование по форвардному PnL</div>
+  <div class="tblwrap wide">
   <table>
     <thead><tr><th>#</th><th>Кошелёк</th><th>Источник</th><th>Скопир.</th><th>Задейств.</th><th>Закрыто</th><th>Открыто</th><th>Винрейт</th><th>Реализ. PnL</th><th>Нереализ. PnL</th><th>PnL итого</th><th>За сегодня</th><th title="переплата против цены цели из-за задержки копирования">Задержка$</th><th>Статус</th><th></th></tr></thead>
     <tbody id="wallets"></tbody>
   </table>
+  </div>
 
   <div class="sec">Открытые позиции — все</div>
+  <div class="tblwrap">
   <table>
     <thead><tr><th>Кошелёк</th><th>Рынок</th><th>Ставка</th><th>Вход</th><th>Тек. кэф</th><th>Вложено</th><th>Оценка</th><th>P/L</th></tr></thead>
     <tbody id="open"></tbody>
   </table>
+  </div>
 
   <div class="sec">Последние действия</div>
+  <div class="tblwrap">
   <table>
     <thead><tr><th>Время</th><th>Кошелёк</th><th>Действие</th><th>Ставка</th><th>Рынок</th><th>PnL / сумма</th></tr></thead>
     <tbody id="log"></tbody>
   </table>
+  </div>
 </div>
 
 <div class="modal-bg" id="modal" onclick="if(event.target===this)closeSkipped()">
@@ -575,25 +654,43 @@ const tm = ts => { const d=new Date(ts*1000);
          String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0'); };
 
 function sparkline(hist){
-  const svg=$("spark"); const W=svg.clientWidth||1000, H=90, pad=6;
+  const svg=$("spark"); const W=svg.clientWidth||1000, H=132, pad=10, padR=64, padB=18;
   svg.innerHTML="";
-  if(!hist||hist.length<2){ svg.innerHTML='<text x="10" y="48" fill="#8b949e" font-size="12">данных пока нет</text>'; return; }
-  const xs=hist.map(p=>p[0]), ys=hist.map(p=>p[2]); // total pnl
-  const x0=Math.min(...xs), x1=Math.max(...xs); let y0=Math.min(...ys,0), y1=Math.max(...ys,0);
-  if(y1===y0){y1+=1;y0-=1;}
-  const X=t=>pad+(W-2*pad)*(x1===x0?0.5:(t-x0)/(x1-x0));
-  const Y=v=>pad+(H-2*pad)*(1-(v-y0)/(y1-y0));
-  // нулевая линия
-  const yz=Y(0);
-  let g='<line x1="'+pad+'" y1="'+yz+'" x2="'+(W-pad)+'" y2="'+yz+'" stroke="#30363d" stroke-dasharray="3 3"/>';
+  if(!hist||hist.length<2){ svg.innerHTML='<text x="14" y="70" fill="#5f7e8e" font-size="12">данных пока нет</text>'; return; }
+  let pts=hist;                                        // прореживание: рисуем максимум ~700 точек
+  if(pts.length>700){ const k=Math.ceil(pts.length/700);
+    pts=pts.filter((_,i)=>i%k===0); if(pts[pts.length-1]!==hist[hist.length-1]) pts.push(hist[hist.length-1]); }
+  const xs=pts.map(p=>p[0]), ys=pts.map(p=>p[2]);      // total pnl
+  const x0=Math.min(...xs), x1=Math.max(...xs);
+  let y0=Math.min(...ys,0), y1=Math.max(...ys,0);
+  const span=(y1-y0)||2; y0-=span*.07; y1+=span*.07;
+  const X=t=>pad+(W-pad-padR)*(x1===x0?0.5:(t-x0)/(x1-x0));
+  const Y=v=>pad+(H-pad-padB)*(1-(v-y0)/(y1-y0));
   const last=ys[ys.length-1];
-  const col=last>0?"#3fb950":(last<0?"#f85149":"#8b949e");
-  let d="M "+X(xs[0])+" "+Y(ys[0]);
-  for(let i=1;i<hist.length;i++) d+=" L "+X(xs[i])+" "+Y(ys[i]);
-  // заливка
-  let area=d+" L "+X(xs[xs.length-1])+" "+yz+" L "+X(xs[0])+" "+yz+" Z";
-  g+='<path d="'+area+'" fill="'+col+'" opacity="0.10"/>';
-  g+='<path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="2"/>';
+  const col=last>0?"#2bf5b0":(last<0?"#ff3b6b":"#8b949e");
+  const fmt=v=>(v<0?"-":"")+"$"+Math.abs(Math.round(v)).toLocaleString("en-US");
+  let g='<defs><linearGradient id="pg" x1="0" y1="0" x2="0" y2="1">'+
+        '<stop offset="0%" stop-color="'+col+'" stop-opacity="0.28"/>'+
+        '<stop offset="100%" stop-color="'+col+'" stop-opacity="0"/></linearGradient></defs>';
+  for(let i=1;i<=3;i++){ const gy=pad+(H-pad-padB)*i/4;    // сетка
+    g+='<line x1="'+pad+'" y1="'+gy+'" x2="'+(W-padR)+'" y2="'+gy+'" stroke="rgba(95,126,142,.10)"/>'; }
+  const yz=Y(0);
+  if(yz>pad&&yz<H-padB)
+    g+='<line x1="'+pad+'" y1="'+yz+'" x2="'+(W-padR)+'" y2="'+yz+'" stroke="rgba(95,126,142,.35)" stroke-dasharray="4 4"/>'+
+       '<text x="'+(W-padR+6)+'" y="'+(yz+4)+'" fill="#3d5866" font-size="10">$0</text>';
+  let d="M "+X(xs[0]).toFixed(1)+" "+Y(ys[0]).toFixed(1);
+  for(let i=1;i<pts.length;i++) d+=" L "+X(xs[i]).toFixed(1)+" "+Y(ys[i]).toFixed(1);
+  const lx=X(xs[xs.length-1]), ly=Y(last);
+  g+='<path d="'+d+' L '+lx.toFixed(1)+' '+(H-padB)+' L '+X(xs[0]).toFixed(1)+' '+(H-padB)+' Z" fill="url(#pg)"/>';
+  g+='<path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="2" stroke-linejoin="round" '+
+     'style="filter:drop-shadow(0 0 6px '+col+')"/>';
+  g+='<circle class="ping" cx="'+lx.toFixed(1)+'" cy="'+ly.toFixed(1)+'" r="4" fill="'+col+'" opacity=".7"/>';
+  g+='<circle cx="'+lx.toFixed(1)+'" cy="'+ly.toFixed(1)+'" r="3.5" fill="'+col+'" '+
+     'style="filter:drop-shadow(0 0 8px '+col+')"/>';
+  g+='<text x="'+(W-padR+6)+'" y="'+Math.max(pad+9,Math.min(H-padB-2,ly+4))+'" fill="'+col+'" font-size="11" font-weight="700">'+fmt(last)+'</text>';
+  const yMax=Math.max(...ys), yMin=Math.min(...ys);
+  if(Math.abs(Y(yMax)-ly)>14) g+='<text x="'+(W-padR+6)+'" y="'+(Y(yMax)+4)+'" fill="#3d5866" font-size="10">'+fmt(yMax)+'</text>';
+  if(Math.abs(Y(yMin)-ly)>14&&Math.abs(Y(yMin)-Y(yMax))>14) g+='<text x="'+(W-padR+6)+'" y="'+(Y(yMin)+4)+'" fill="#3d5866" font-size="10">'+fmt(yMin)+'</text>';
   svg.innerHTML=g;
 }
 
@@ -607,10 +704,17 @@ async function tick(){
   $("err").textContent = st.error ? ("ошибка опроса: "+st.error) : "";
 
   $("hero").className="hero num "+cls(d.pnl);
-  $("hero").innerHTML = money(d.pnl)+'<span class="sub">итого PnL · реализ. '+money(d.realized)+' · '+(d.roi*100).toFixed(1)+'% от банкролла</span>';
+  $("hero").textContent = money(d.pnl);
+  const chip=(k,v,c)=>'<span class="chip '+(c||"")+'">'+k+' <b>'+v+'</b></span>';
+  $("chips").innerHTML =
+    chip("реализовано",money(d.realized),cls(d.realized))+
+    chip("за сегодня",money(d.pnl_today||0),cls(d.pnl_today||0))+
+    chip("ROI",(d.roi*100).toFixed(1)+"%",cls(d.roi))+
+    (d.real?chip("реал-кэш",money(d.real.pnl||0),cls(d.real.pnl||0)):"");
 
+  // [метка, значение, класс значения, клик-журнал, класс карточки]
   const cardsArr = [
-    ["PnL за сегодня", money(d.pnl_today||0), cls(d.pnl_today||0)],
+    ["PnL за сегодня", money(d.pnl_today||0), cls(d.pnl_today||0), "", "feat"],
     ["Реализовано (закрытые)", money(d.realized), cls(d.realized)],
     ["Нереализ. PnL (открытые)", money(d.unrealized), cls(d.unrealized)],
     ["Открытых позиций", d.n_open, ""],
@@ -623,23 +727,27 @@ async function tick(){
   ];
   if(d.real){
     cardsArr.splice(1, 0, ["Реал-PnL (кэш $"+((d.real.base||0)/1000).toFixed(1)+"k, без доливов)",
-                           money(d.real.pnl||0), cls(d.real.pnl||0)]);
+                           money(d.real.pnl||0), cls(d.real.pnl||0), "", "vio"]);
     cardsArr.push(["Пропущено входов (реал)", (d.real.missed||0)+" ("+(d.real.missed_pct||0)+"%)",
-                   (d.real.missed_pct>25?"neg":"")]);
+                   (d.real.missed_pct>25?"neg":""), "", "vio"]);
   }
-  $("cards").innerHTML = cardsArr.map(c=>'<div class="card'+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+'</div>').join("");
+  $("cards").innerHTML = cardsArr.map(c=>'<div class="card'+(c[4]?' '+c[4]:'')+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v num '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+'</div>').join("");
 
   sparkline(d.pnl_history);
 
+  const winbar = r => { const p=Math.round(r*100);
+    const c = p>=60?"var(--green)":(p>=40?"var(--accent)":"var(--red)");
+    return '<span class="wr"><i style="width:'+Math.max(3,Math.round(p*.45))+'px;background:'+c+
+           ';box-shadow:0 0 7px '+c+'"></i><b>'+p+'%</b></span>'; };
   $("wallets").innerHTML = (d.per_wallet||[]).map((w,i)=>
-    '<tr><td class="num muted">'+(i+1)+'</td>'+
+    '<tr><td class="rank num'+(i<3?' r'+(i+1):'')+'">'+(i+1)+'</td>'+
     '<td>'+addrLink(w.wallet)+'</td>'+
     '<td><span class="rtag">'+(w.source||"—")+'</span></td>'+
     '<td class="num">'+w.copied+'</td>'+
     '<td class="num muted">'+money(w.spent)+'</td>'+
     '<td class="num">'+w.closed+'</td>'+
     '<td class="num">'+(w.open_n||0)+'</td>'+
-    '<td class="num">'+(w.closed?(w.win_rate*100).toFixed(0)+"%":"—")+'</td>'+
+    '<td class="num">'+(w.closed?winbar(w.win_rate):"—")+'</td>'+
     '<td class="num '+cls(w.realized)+'">'+money(w.realized)+'</td>'+
     '<td class="num '+cls(w.unrealized)+'">'+money(w.unrealized)+'</td>'+
     '<td class="num '+cls(w.total)+'">'+money(w.total)+(w.spent>0?' <span class="muted">('+(w.total/w.spent>=0?'+':'')+(w.total/w.spent*100).toFixed(0)+'%)</span>':'')+'</td>'+
