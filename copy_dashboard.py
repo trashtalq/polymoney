@@ -960,6 +960,48 @@ def api_rescale():
     return jsonify({"ok": True, **res})
 
 
+@app.route("/api/add_wallet", methods=["POST"])
+def api_add_wallet():
+    """Добавить кошельки в watchlist (пароль в теле): {pw, wallets:[...], source:"метка"}.
+    Дедуп по текущему списку; вручную удалённые (wallet_sources=удалён-вручную) НЕ возвращаем
+    (их выкинули осознанно), если не передан force=true. Hot-reload подхватит без рестарта."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    ws = [(w or "").lower().strip() for w in (data.get("wallets") or [])]
+    ws = [w for w in ws if w.startswith("0x") and len(w) == 42]
+    if not ws:
+        return jsonify({"ok": False, "error": "no wallets"}), 400
+    path = Path(STATE.get("wl_path") or "copy_watchlist.json")
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(e)}), 500
+    sp = Path("wallet_sources.json")
+    try:
+        srcs = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
+    except Exception:  # noqa: BLE001
+        srcs = {}
+    have = {x.lower() for x in d.get("watchlist", [])}
+    deleted = {w for w, s in srcs.items() if s == "удалён-вручную"}
+    force = bool(data.get("force"))
+    new = [w for w in dict.fromkeys(ws)                       # dict.fromkeys = дедуп с порядком
+           if w not in have and (force or w not in deleted)]
+    d["watchlist"].extend(new)
+    d["count"] = len(d["watchlist"])
+    path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    label = (data.get("source") or "добавлен-вручную")[:40]
+    for w in new:
+        srcs[w] = label
+    try:
+        sp.write_text(json.dumps(srcs, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    return jsonify({"ok": True, "added": len(new), "dup": sum(1 for w in ws if w in have),
+                    "skipped_deleted": sum(1 for w in set(ws) - have if w in deleted and not force),
+                    "count": d["count"], "wallets_added": new})
+
+
 @app.route("/api/renorm", methods=["POST"])
 def api_renorm():
     """Восстановление смешанного масштаба книги -> единый /10 (per_trade=10). Пароль в теле.
