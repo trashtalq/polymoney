@@ -6,8 +6,8 @@ services:
     environment:
       DASH_HOST: "0.0.0.0"
       DASH_PORT: "5000"
-      BANKROLL: "100000"
-      PER_TRADE: "100"
+      BANKROLL: "1000"
+      PER_TRADE: "1"
       INTERVAL: "120"
     ports:
       - "5000:5000"                  # открыт по http://IP:5000 (бумага, без ключей — ок)

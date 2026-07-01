@@ -13,8 +13,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 HOST = os.environ.get("DASH_HOST", "0.0.0.0")
 PORT = os.environ.get("DASH_PORT", "5000")
-BANKROLL = os.environ.get("BANKROLL", "100000")
-PER_TRADE = os.environ.get("PER_TRADE", "100")
+BANKROLL = os.environ.get("BANKROLL", "1000")
+PER_TRADE = os.environ.get("PER_TRADE", "1")
 INTERVAL = os.environ.get("INTERVAL", "120")
 
 SERVICES = {

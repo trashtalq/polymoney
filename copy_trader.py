@@ -79,7 +79,7 @@ def _blocked_reason(title: str):
 def purge_blocked(book: dict) -> dict:
     """Пересчёт книги «как будто футбол/погода никогда не копировались»: удаляет такие позиции
     и записи лога, заново сводит realized/bankroll/cash/topups (консистентно, режим автодолива)."""
-    base = 100000.0
+    base = round(book.get("bankroll", 0.0) - book.get("topups", 0.0), 2)   # исходный капитал (инвариант к масштабу книги)
     removed = [k for k, p in book.get("positions", {}).items() if _blocked_reason(p.get("title"))]
     for k in removed:
         book["positions"].pop(k, None)
@@ -103,7 +103,7 @@ def purge_wallet(book: dict, wallet: str) -> dict:
     """Пересчёт книги «как будто этого кошелька никогда не было»: удаляет его позиции/лог/теневые
     записи и заново сводит realized/bankroll/cash/topups (консистентно, режим автодолива)."""
     addr = (wallet or "").lower()
-    base = 100000.0
+    base = round(book.get("bankroll", 0.0) - book.get("topups", 0.0), 2)   # исходный капитал (инвариант к масштабу книги)
     removed = [k for k, p in book.get("positions", {}).items() if (p.get("wallet") or "").lower() == addr]
     for k in removed:
         book["positions"].pop(k, None)
@@ -134,17 +134,60 @@ def purge_wallet(book: dict, wallet: str) -> dict:
             "realized": book["realized"], "bankroll": book["bankroll"],
             "cash": book["cash"], "topups": book["topups"]}
 
+
+def rescale_book(book: dict, factor: float) -> dict:
+    """Масштабирует ВСЕ денежные величины книги на factor (напр. 0.01 = /100), приближая
+    бумажный контур к реальному размеру счёта.
+    Масштабируем: bankroll/cash/realized/skipped_realized/topups; cost И qty позиций (вместе,
+    чтобы цена входа cost/qty сохранилась); spend/pnl в логе; notional/qty/pnl теневых;
+    realized+total в кривой PnL; дневной снимок «за сегодня».
+    НЕ трогаем: цены (px/entry/their_px/val), счётчики сделок, таймстемпы, seen, а также
+    typical/thold — это РЕАЛЬНЫЕ размеры целей, используются как отношения (масштаб их сломал бы)."""
+    f = float(factor)
+    b4 = round(book.get("bankroll", 0.0) or 0.0, 2)
+    for k in ("bankroll", "cash", "realized", "skipped_realized", "topups"):
+        if book.get(k) is not None:
+            book[k] = round(book[k] * f, 2)
+    for p in book.get("positions", {}).values():
+        p["qty"] = (p.get("qty", 0.0) or 0.0) * f
+        p["cost"] = round((p.get("cost", 0.0) or 0.0) * f, 6)
+    for r in book.get("log", []):
+        for k in ("spend", "pnl"):
+            if r.get(k) is not None:
+                r[k] = round(r[k] * f, 4)
+    for r in book.get("skipped", []):
+        for k in ("notional", "qty"):
+            if r.get(k) is not None:
+                r[k] = r[k] * f
+        if r.get("pnl") is not None:
+            r["pnl"] = round(r["pnl"] * f, 4)
+    for h in book.get("pnl_history", []):
+        if len(h) >= 3:
+            h[1] = round((h[1] or 0.0) * f, 2)                 # realized
+            h[2] = round((h[2] or 0.0) * f, 2)                 # total pnl
+    db = book.get("day_baseline")
+    if db and isinstance(db.get("per_wallet"), dict):
+        for w, v in db["per_wallet"].items():
+            db["per_wallet"][w] = round((v or 0.0) * f, 2)
+    return {"factor": round(f, 10), "bankroll_before": b4,
+            "bankroll_after": round(book.get("bankroll", 0.0) or 0.0, 2)}
+
+
 # --- Сайзинг по убеждённости: $per-trade = ПОТОЛОК НА ВХОД, вниз масштабируем по ставке цели ---
 SIZE_BY_CONVICTION = True
-MIN_SIZE_FRAC = 0.2      # не меньше 20% потолка ($20 при $100), иначе дребезг
+MIN_SIZE_FRAC = 0.2      # не меньше 20% потолка (доля от per_trade), иначе дребезг
 EMA_ALPHA = 0.2          # сглаживание "обычной" ставки цели
 
 # --- Усреднение: повторяем докупки цели, но только ЛОГИЧНЫЕ (вниз/флэт), с предохранителем ---
 MAX_POSITION_MULT = 4    # потолок позиции = 4×per_trade (усреднения допускаются, но не безгранично)
 AVG_UP_TOL = 0.05        # докупаем, только если цена не выше нашей средней более чем на это (центы цены)
 
+# Пыле-порог входа = доля от per_trade (не абсолютный $1!), чтобы масштаб (/100) не резал ставки:
+# при per_trade=100 это $1 (как раньше), при per_trade=1 — $0.01. Иначе сайзинг по убеждённости мёртв.
+MIN_BET_FRAC = 0.01
+
 # --- Теневой бэктест фильтра: фиксированный нотионал на отфильтрованную сделку ---
-SHADOW_NOTIONAL = 10.0   # $ на каждый теневой вход (единый размер для честного сравнения)
+SHADOW_NOTIONAL = 0.1    # $ на каждый теневой вход (единый размер для честного сравнения; масштаб /100)
 
 # --- ЗЕРКАЛЬНЫЙ РЕЖИМ (выключен): при True вход по цене цели без слиппеджа/фильтра (нереалистично).
 # Держим False: вход/выход по РЫНКУ + слиппедж -> P/L отражает реальную плату за задержку копира. ---
@@ -340,10 +383,10 @@ def _mirror_buy(book: dict, e: dict, per_trade: float, wallet: str) -> bool:
     pos = book["positions"].get(key)
     invested = pos["cost"] if pos else 0.0
     room = per_trade * MAX_POSITION_MULT - invested
-    if room < 1:
+    if room < per_trade * MIN_BET_FRAC:
         return False                                  # позиция у потолка (риск-кап сохраняем)
     spend = min(want, room)
-    if spend < 1:
+    if spend < per_trade * MIN_BET_FRAC:
         return False
     if book["cash"] < spend:
         deficit = spend - book["cash"]
@@ -456,10 +499,10 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
         if px > avg + AVG_UP_TOL:
             return _record_skip(book, e, base, "avg_up", per_trade, slippage, wallet)
     room = per_trade * MAX_POSITION_MULT - invested  # общий потолок позиции (один вход всё равно <= per_trade)
-    if room < 1:
+    if room < per_trade * MIN_BET_FRAC:
         return _record_skip(book, e, base, "cap", per_trade, slippage, wallet)
     spend = min(want, room)                           # размер как прежде — кэш НЕ ограничивает (бумага)
-    if spend < 1:
+    if spend < per_trade * MIN_BET_FRAC:
         return False                                 # нет места под потолком позиции
     if book["cash"] < spend:                          # баланс не должен заканчиваться -> доливаем капитал
         deficit = spend - book["cash"]                # +deficit и в кэш, и в банкролл -> PnL($) не меняется
@@ -754,8 +797,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Бумажное копи отобранных Polymarket-кошельков")
     p.add_argument("--wallets", help="адреса целей через запятую")
     p.add_argument("--from-watchlist", help="взять цели из файла ranked_watchlist.json")
-    p.add_argument("--bankroll", type=float, default=10_000, help="стартовый банкролл $ (дефолт 10000)")
-    p.add_argument("--per-trade", type=float, default=100, help="ставка $ на одну копируемую сделку (дефолт 100)")
+    p.add_argument("--bankroll", type=float, default=1_000, help="стартовый банкролл $ (дефолт 1000, масштаб /100)")
+    p.add_argument("--per-trade", type=float, default=1, help="ставка $ на одну копируемую сделку (дефолт 1, масштаб /100)")
     p.add_argument("--slippage", type=float, default=0.01, help="проскальзывание на исполнении, в долях цены (дефолт 0.01 = 1 цент)")
     p.add_argument("--state", default="paper_book.json", help="файл состояния (книга)")
     p.add_argument("--interval", type=int, default=600, help="период опроса в секундах для --watch (дефолт 600)")

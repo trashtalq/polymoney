@@ -904,6 +904,31 @@ def api_remove_wallet():
     return jsonify({"ok": True, "removed": before - d["count"], "count": d["count"], **purge})
 
 
+@app.route("/api/rescale", methods=["POST"])
+def api_rescale():
+    """Однократный пересчёт ВСЕЙ книги в другой масштаб (напр. /100 — приближение к реалу).
+    Идемпотентно: передаём ЦЕЛЕВОЙ банкролл (to_bankroll), множитель считается от текущего,
+    поэтому повторный вызов с той же целью = множитель ~1 (без эффекта). Пароль в теле."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    with _lock:
+        cur = float(STATE["book"].get("bankroll", 0.0) or 0.0)
+        to = data.get("to_bankroll")
+        factor = data.get("factor")
+        if to is not None and cur > 0:
+            factor = float(to) / cur
+        if not factor or float(factor) <= 0:
+            return jsonify({"ok": False, "error": "bad factor"}), 400
+        res = ct.rescale_book(STATE["book"], float(factor))
+        STATE["book_ver"] += 1          # инвалидирует снимок, который мог снять poll_loop до этого
+        try:
+            ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
+        except Exception:  # noqa: BLE001
+            pass
+    return jsonify({"ok": True, **res})
+
+
 @app.route("/api/purge_blocked", methods=["POST"])
 def api_purge_blocked():
     """Пересчитать книгу как будто футбол/погода никогда не копировались (пароль в теле)."""
@@ -968,8 +993,8 @@ def main():
     p = argparse.ArgumentParser(description="Веб-дашборд бумажного копи")
     p.add_argument("--wallets", help="адреса целей через запятую")
     p.add_argument("--from-watchlist", help="взять цели из ranked_watchlist.json")
-    p.add_argument("--bankroll", type=float, default=100_000)
-    p.add_argument("--per-trade", type=float, default=100)
+    p.add_argument("--bankroll", type=float, default=1_000)
+    p.add_argument("--per-trade", type=float, default=1)
     p.add_argument("--slippage", type=float, default=0.01)
     p.add_argument("--state", default="paper_book.json")
     p.add_argument("--interval", type=int, default=120, help="период опроса, сек (дефолт 120)")
