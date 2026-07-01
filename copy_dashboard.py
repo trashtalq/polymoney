@@ -929,6 +929,24 @@ def api_rescale():
     return jsonify({"ok": True, **res})
 
 
+@app.route("/api/renorm", methods=["POST"])
+def api_renorm():
+    """Восстановление смешанного масштаба книги -> единый /10 (per_trade=10). Пароль в теле.
+    Нужно один раз после того, как PER_TRADE наконец доехал на сервер (см. renorm_book)."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    tb = float(data.get("target_base", 10000.0))
+    with _lock:
+        res = ct.renorm_book(STATE["book"], target_base=tb)
+        STATE["book_ver"] += 1          # инвалидирует снимок, который мог снять poll_loop до этого
+        try:
+            ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
+        except Exception:  # noqa: BLE001
+            pass
+    return jsonify({"ok": True, **res})
+
+
 @app.route("/api/purge_blocked", methods=["POST"])
 def api_purge_blocked():
     """Пересчитать книгу как будто футбол/погода никогда не копировались (пароль в теле)."""

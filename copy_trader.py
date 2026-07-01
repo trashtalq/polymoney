@@ -173,6 +173,68 @@ def rescale_book(book: dict, factor: float) -> dict:
             "bankroll_after": round(book.get("bankroll", 0.0) or 0.0, 2)}
 
 
+def renorm_book(book: dict, target_base: float = 10000.0, thresh: float = 10.0) -> dict:
+    """ВОССТАНОВЛЕНИЕ смешанного масштаба -> единый /10 (per_trade=10).
+    Причина беды: docker-compose.yml с PER_TRADE не доезжал на сервер, поэтому после /100-пересчёта
+    сервер продолжал ставить по $100 -> книга смешалась (старьё /100 + новые позиции per_trade=100).
+    Приводим ВСЁ к масштабу /10 от исходного:
+      - позиции per_trade=100 (cost>thresh) -> /10; чистые /100-позиции (cost<=thresh) -> x10;
+        cost И qty вместе (цена входа сохраняется);
+      - лог/теневые/кривая — по времени относительно t0 (возобновление $100-ставок): до t0 -> x10,
+        с t0 -> /10; t0 = самая ранняя «загрязнённая» позиция;
+    затем СВОДИМ агрегаты (realized/invested/topups/bankroll/cash) заново от лога и позиций,
+    база = target_base (10000 = 1000*10). typical/thold (реальные размеры целей) НЕ трогаем."""
+    conta = [p.get("opened", 0) for p in book.get("positions", {}).values()
+             if (p.get("cost", 0) or 0) > thresh and p.get("opened")]
+    t0 = min(conta) if conta else float("inf")
+
+    for p in book.get("positions", {}).values():
+        f = 0.1 if (p.get("cost", 0) or 0) > thresh else 10.0
+        p["qty"] = (p.get("qty", 0.0) or 0.0) * f
+        p["cost"] = round((p.get("cost", 0.0) or 0.0) * f, 6)
+
+    def tf(t):
+        return 0.1 if (t or 0) >= t0 else 10.0
+    for r in book.get("log", []):
+        f = tf(r.get("t", 0))
+        for k in ("spend", "pnl"):
+            if r.get(k) is not None:
+                r[k] = round(r[k] * f, 4)
+    for r in book.get("skipped", []):
+        f = tf(r.get("t", 0))
+        for k in ("notional", "qty"):
+            if r.get(k) is not None:
+                r[k] = r[k] * f
+        if r.get("pnl") is not None:
+            r["pnl"] = round(r["pnl"] * f, 4)
+    for h in book.get("pnl_history", []):
+        if len(h) >= 3:
+            f = tf(h[0])
+            h[1] = round((h[1] or 0.0) * f, 2)
+            h[2] = round((h[2] or 0.0) * f, 2)
+    db = book.get("day_baseline")
+    if db and isinstance(db.get("per_wallet"), dict):                # снимок полуночи — /100-эра -> x10
+        for w, v in db["per_wallet"].items():
+            db["per_wallet"][w] = round((v or 0.0) * 10.0, 2)
+
+    # свести агрегаты заново (как в purge): база фиксирована, остальное — от лога/позиций
+    realized = sum((r.get("pnl") or 0) for r in book.get("log", []) if "pnl" in r)
+    invested = sum((p.get("cost", 0) or 0) for p in book.get("positions", {}).values())
+    skipped_realized = sum((r.get("pnl") or 0) for r in book.get("skipped", []) if r.get("resolved"))
+    n_copied = sum(1 for r in book.get("log", []) if r.get("act") == "BUY")
+    topups = max(0.0, invested - realized - target_base)
+    book["realized"] = round(realized, 2)
+    book["skipped_realized"] = round(skipped_realized, 2)
+    book["n_copied"] = n_copied
+    book["n_skipped"] = len(book.get("skipped", []))
+    book["topups"] = round(topups, 2)
+    book["bankroll"] = round(target_base + topups, 2)
+    book["cash"] = round(target_base + topups + realized - invested, 2)
+    return {"t0": (None if t0 == float("inf") else t0), "bankroll": book["bankroll"],
+            "invested": round(invested, 2), "realized": book["realized"],
+            "topups": book["topups"], "positions": len(book.get("positions", {}))}
+
+
 # --- Сайзинг по убеждённости: $per-trade = ПОТОЛОК НА ВХОД, вниз масштабируем по ставке цели ---
 SIZE_BY_CONVICTION = True
 MIN_SIZE_FRAC = 0.2      # не меньше 20% потолка (доля от per_trade), иначе дребезг
