@@ -40,6 +40,7 @@ ADMIN_HASH = (hashlib.sha256(os.environ["ADMIN_PASS"].encode("utf-8")).hexdigest
 _lock = threading.Lock()
 STATE = {
     "book": None,
+    "book_ver": 0,     # растёт при любой прямой правке книги в обход poll_loop (purge/удаление кошелька)
     "marks": {},
     "status": {"started_at": int(time.time()), "last_poll": 0, "polling": False,
                "error": "", "n_polls": 0, "wallets": 0},
@@ -231,6 +232,7 @@ def poll_loop(api, wallets, per_trade, slippage, interval, state_file, wl_path=N
             with _lock:
                 STATE["status"]["polling"] = True
                 STATE["status"]["wallets"] = len(wallets)
+                ver0 = STATE["book_ver"]                    # версия книги на момент снимка
                 working = copy.deepcopy(STATE["book"])
             # сам цикл (API-запросы) — БЕЗ блокировки, чтобы страница не висла
             marks = ct.cycle(api, working, wallets, per_trade, slippage)
@@ -245,13 +247,20 @@ def poll_loop(api, wallets, per_trade, slippage, interval, state_file, wl_path=N
             if len(hist) > 2000:
                 del hist[:len(hist) - 2000]
             with _lock:
-                STATE["book"] = working
-                STATE["marks"] = marks
-                STATE["status"]["last_poll"] = int(time.time())
-                STATE["status"]["n_polls"] += 1
-                STATE["status"]["polling"] = False
-                STATE["status"]["error"] = ""
-                ct.save_book(state_file, working)
+                if STATE["book_ver"] != ver0:
+                    # книгу правили извне (purge/удаление кошелька) пока мы опрашивали API —
+                    # наш снимок устарел, коммитить его нельзя (иначе откатим правку). Пропускаем
+                    # цикл целиком, на следующем круге просто повторим (seen не продвинулись).
+                    STATE["status"]["polling"] = False
+                    STATE["status"]["error"] = ""
+                else:
+                    STATE["book"] = working
+                    STATE["marks"] = marks
+                    STATE["status"]["last_poll"] = int(time.time())
+                    STATE["status"]["n_polls"] += 1
+                    STATE["status"]["polling"] = False
+                    STATE["status"]["error"] = ""
+                    ct.save_book(state_file, working)
         except Exception as e:  # noqa: BLE001
             with _lock:
                 STATE["status"]["error"] = str(e)
@@ -884,6 +893,7 @@ def api_remove_wallet():
         pass
     with _lock:
         purge = ct.purge_wallet(STATE["book"], addr)
+        STATE["book_ver"] += 1          # инвалидирует снимок, который мог снять poll_loop до этого
         try:
             ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
         except Exception:  # noqa: BLE001
@@ -899,6 +909,7 @@ def api_purge_blocked():
         return jsonify({"ok": False, "error": "auth"}), 401
     with _lock:
         res = ct.purge_blocked(STATE["book"])
+        STATE["book_ver"] += 1          # инвалидирует снимок, который мог снять poll_loop до этого
         try:
             ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
         except Exception:  # noqa: BLE001

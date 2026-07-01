@@ -124,7 +124,12 @@ def purge_wallet(book: dict, wallet: str) -> dict:
     book["topups"] = round(topups, 2)
     book["bankroll"] = round(base + topups, 2)
     book["cash"] = round(base + topups + realized - invested, 2)
-    book.pop("day_baseline", None)                       # снимок «за сегодня» устарел — начнём заново
+    # «сегодня»: сдвигаем базовую точку на вклад УДАЛЯЕМОГО кошелька на момент полуночи, а не
+    # сбрасываем всю базу — иначе «сегодня» остальных кошельков тоже занулилось бы задаром.
+    db = book.get("day_baseline")
+    if db:
+        contrib_mid = db.get("per_wallet", {}).pop(addr, 0.0)
+        db["total_pnl"] = round(db.get("total_pnl", 0.0) - contrib_mid, 2)
     return {"removed_positions": len(removed), "positions_left": len(book["positions"]),
             "realized": book["realized"], "bankroll": book["bankroll"],
             "cash": book["cash"], "topups": book["topups"]}
