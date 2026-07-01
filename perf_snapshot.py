@@ -74,7 +74,7 @@ def restart(t):
     env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     out = open(t["log"], "ab")
     subprocess.Popen([sys.executable, "copy_dashboard.py",
-                      "--from-watchlist", t["wl"], "--bankroll", "1000", "--per-trade", "1",
+                      "--from-watchlist", t["wl"], "--bankroll", "10000", "--per-trade", "10",
                       "--interval", "120", "--state", t["state"], "--port", str(t["port"])],
                      stdout=out, stderr=out, creationflags=flags, env=env, close_fds=True)
     log(f"[{t['name']}] дашборд не отвечал -> перезапущен на :{t['port']}")

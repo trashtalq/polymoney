@@ -187,7 +187,7 @@ AVG_UP_TOL = 0.05        # докупаем, только если цена не
 MIN_BET_FRAC = 0.01
 
 # --- Теневой бэктест фильтра: фиксированный нотионал на отфильтрованную сделку ---
-SHADOW_NOTIONAL = 0.1    # $ на каждый теневой вход (единый размер для честного сравнения; масштаб /100)
+SHADOW_NOTIONAL = 1.0    # $ на каждый теневой вход (единый размер для честного сравнения; масштаб /10)
 
 # --- ЗЕРКАЛЬНЫЙ РЕЖИМ (выключен): при True вход по цене цели без слиппеджа/фильтра (нереалистично).
 # Держим False: вход/выход по РЫНКУ + слиппедж -> P/L отражает реальную плату за задержку копира. ---
@@ -797,8 +797,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Бумажное копи отобранных Polymarket-кошельков")
     p.add_argument("--wallets", help="адреса целей через запятую")
     p.add_argument("--from-watchlist", help="взять цели из файла ranked_watchlist.json")
-    p.add_argument("--bankroll", type=float, default=1_000, help="стартовый банкролл $ (дефолт 1000, масштаб /100)")
-    p.add_argument("--per-trade", type=float, default=1, help="ставка $ на одну копируемую сделку (дефолт 1, масштаб /100)")
+    p.add_argument("--bankroll", type=float, default=10_000, help="стартовый банкролл $ (дефолт 10000, масштаб /10)")
+    p.add_argument("--per-trade", type=float, default=10, help="ставка $ на одну копируемую сделку (дефолт 10, масштаб /10)")
     p.add_argument("--slippage", type=float, default=0.01, help="проскальзывание на исполнении, в долях цены (дефолт 0.01 = 1 цент)")
     p.add_argument("--state", default="paper_book.json", help="файл состояния (книга)")
     p.add_argument("--interval", type=int, default=600, help="период опроса в секундах для --watch (дефолт 600)")

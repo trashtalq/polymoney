@@ -11,8 +11,8 @@ import copy_dashboard as cd
 
 BOOK = "paper_book.json"
 WL = "copy_watchlist.json"
-BANKROLL = float(os.environ.get("BANKROLL", "1000"))
-PER_TRADE = float(os.environ.get("PER_TRADE", "1"))
+BANKROLL = float(os.environ.get("BANKROLL", "10000"))
+PER_TRADE = float(os.environ.get("PER_TRADE", "10"))
 
 book = ct.load_book(BOOK, BANKROLL)
 wallets = [w.lower() for w in json.load(open(WL, encoding="utf-8"))["watchlist"]]
