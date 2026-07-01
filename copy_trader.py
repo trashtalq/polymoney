@@ -34,6 +34,8 @@ CLOB_API = "https://clob.polymarket.com"
 
 # кэш резолва рынков (раз зарезолвлен — не меняется): conditionId -> {token_id: 1.0/0.0}
 _RES_CACHE: dict = {}
+_RES_NEG: dict = {}      # cid -> ts неудачной проверки (ещё НЕ резолвнут) — не долбим оракул чаще TTL
+_RES_NEG_TTL = 1800
 
 # --- Защита EV копира (тюнить здесь) ---------------------------------------
 # Копир входит с задержкой и слиппеджем, поэтому НЕ всякую сделку цели стоит
@@ -250,6 +252,12 @@ MIN_BET_FRAC = 0.01
 
 # --- Теневой бэктест фильтра: фиксированный нотионал на отфильтрованную сделку ---
 SHADOW_NOTIONAL = 1.0    # $ на каждый теневой вход (единый размер для честного сравнения; масштаб /10)
+
+# --- Скорость цикла: полный скан позиций цели дорогой (пагинация по каждому кошельку),
+# а задержка — главный кост копира. Скан делаем редко (стаггером); цены каждый цикл берём
+# ОДНИМ батчем midpoints; резолвы добирает независимый оракул CLOB (+ негативный кэш). ---
+POS_EVERY = 10                  # полный скан позиций каждого кошелька раз в N циклов
+SHADOW_RESOLVE_PER_CYCLE = 30   # столько старых теневых записей добираем оракулом за цикл
 
 # --- ЗЕРКАЛЬНЫЙ РЕЖИМ (выключен): при True вход по цене цели без слиппеджа/фильтра (нереалистично).
 # Держим False: вход/выход по РЫНКУ + слиппедж -> P/L отражает реальную плату за задержку копира. ---
@@ -673,38 +681,88 @@ def settle_shadow(book: dict, resolved: dict) -> None:
         book["skipped_realized"] = book.get("skipped_realized", 0.0) + pnl
 
 
+def _oracle(api: API, cid: str):
+    """Резолв рынка с кэшами: позитив — навсегда (_RES_CACHE), негатив — с TTL (_RES_NEG),
+    чтобы не переспрашивать CLOB про ещё не резолвнутые рынки каждый цикл."""
+    res = _RES_CACHE.get(cid)
+    if res is not None:
+        return res
+    if time.time() - _RES_NEG.get(cid, 0) < _RES_NEG_TTL:
+        return None
+    res = api.market_resolution(cid)
+    if res:
+        _RES_CACHE[cid] = res
+        _RES_NEG.pop(cid, None)
+    else:
+        _RES_NEG[cid] = time.time()
+    return res
+
+
 # ----------------------------- один цикл опроса -----------------------------
 def cycle(api: API, book: dict, wallets: list, per_trade: float, slippage: float) -> dict:
+    """Один цикл: (A) activity по всем целям + РЕДКИЙ скан позиций (1/POS_EVERY, стаггером);
+    (B) цены одним батчем midpoints (токены новых сделок + всё удерживаемое);
+    (C) обработка событий по свежим ценам; (D) резолвы — независимый оракул CLOB
+    (пропавшая цена ИЛИ цена у края) + добор теневых записей.
+    Против старой схемы (positions на КАЖДЫЙ кошелёк каждый цикл) это в разы меньше
+    запросов -> короче цикл -> меньше задержка копира (главный кост)."""
     marks: dict = {}
     resolved_all: dict = {}
-    for w in wallets:
+    ncyc = book["cycle_n"] = book.get("cycle_n", 0) + 1
+
+    # --- (A) лёгкий сбор ---
+    todo = []                                        # (wl, новые события, резолвы из скана позиций)
+    need_px: set = set()
+    for i, w in enumerate(wallets):
         wl = w.lower()
-        # 1) позиции цели -> текущие цены и что зарезолвилось
-        try:
-            poss = api.positions(wl)
-        except Exception as ex:                      # noqa: BLE001
-            poss = []
-            print(f"{wl[:10]}…: позиции недоступны ({ex})")
         resolved: dict = {}
-        for p in poss:
-            tok = _s(p, "asset", "tokenId", "token")
-            if not tok:
-                continue
-            cp = _f(p, "curPrice")
-            marks[tok] = cp
-            if cp <= 0.01 or cp >= 0.99 or p.get("redeemable"):
-                resolved[tok] = 1.0 if cp >= 0.5 else 0.0
-
-        # 2) новые сделки цели (новейшее сверху -> берём новее last_ts, сортируем по возрастанию)
-        evs = api.activity(wl, limit=500)
+        if i % POS_EVERY == ncyc % POS_EVERY:        # редкий полный скан позиций этой цели
+            try:
+                poss = api.positions(wl)
+            except Exception as ex:                  # noqa: BLE001
+                poss = []
+                print(f"{wl[:10]}…: позиции недоступны ({ex})")
+            for p in poss:
+                tok = _s(p, "asset", "tokenId", "token")
+                if not tok:
+                    continue
+                cp = _f(p, "curPrice")
+                marks[tok] = cp
+                if cp <= 0.01 or cp >= 0.99 or p.get("redeemable"):
+                    resolved[tok] = 1.0 if cp >= 0.5 else 0.0
+        try:
+            evs = api.activity(wl, limit=500)
+        except Exception as ex:                      # noqa: BLE001
+            print(f"{wl[:10]}…: activity недоступна ({ex})")
+            todo.append((wl, [], resolved))          # seen НЕ двигаем — доберём в следующий цикл
+            continue
         last = book["seen"].get(wl, 0)
-        new = sorted([e for e in evs if ev_ts(e) > last], key=ev_ts)
-
         if last == 0:
             # ПЕРВЫЙ запуск для кошелька: только фиксируем точку старта, ничего не копируем
             book["seen"][wl] = max([ev_ts(e) for e in evs], default=int(time.time()))
             print(f"{wl[:10]}…: старт — форвард с этой точки, история НЕ копируется")
-        else:
+            todo.append((wl, [], resolved))
+            continue
+        new = sorted([e for e in evs if ev_ts(e) > last], key=ev_ts)
+        for e in new:
+            if classify(e) in ("BUY", "SELL"):
+                need_px.add(ev_token(e))
+        todo.append((wl, new, resolved))
+
+    # --- (B) цены одним махом: входы по ТЕКУЩЕЙ цене (честная плата за задержку) + живой P/L ---
+    held = {p["token"] for p in book["positions"].values()}
+    missing = [t for t in (need_px | held) if t and not (marks.get(t) and marks[t] > 0)]
+    if missing:
+        try:
+            for t, v in api.midpoints(missing).items():
+                if v and v > 0:
+                    marks[t] = v
+        except Exception as ex:                      # noqa: BLE001
+            print(f"[midpoints] недоступны ({ex})")
+
+    # --- (C) обработка событий по свежим ценам ---
+    for wl, new, resolved in todo:
+        if new:
             acted = 0
             for e in new:
                 k = classify(e)
@@ -715,44 +773,28 @@ def cycle(api: API, book: dict, wallets: list, per_trade: float, slippage: float
                     acted += copy_sell(book, e, slippage, cur, wl)
                 elif k == "REDEEM":
                     acted += copy_redeem(book, e, wl)
-            if new:
-                book["seen"][wl] = max(ev_ts(e) for e in new)
+            book["seen"][wl] = max(ev_ts(e) for e in new)
             print(f"{wl[:10]}…: новых событий {len(new)}, скопировано действий {acted}")
-
-        # 3) расчёт по резолву наших открытых позиций этой цели
-        for tok, val in resolved.items():
+        for tok, val in resolved.items():            # резолвы, замеченные сканом позиций
             settle(book, wl, tok, val)
         resolved_all.update(resolved)
 
-    # дотягиваем текущие цены по ВСЕМ удерживаемым токенам (усреднённые/старые позиции,
-    # которых уже нет в снапшотах целей -> иначе их P/L показывался бы нулевым)
-    held = {p["token"] for p in book["positions"].values()}
-    missing = [t for t in held if not (marks.get(t) and marks[t] > 0)]
-    if missing:
-        try:
-            for t, v in api.midpoints(missing).items():
-                if v and v > 0:
-                    marks[t] = v
-        except Exception as ex:                      # noqa: BLE001
-            print(f"[midpoints] недоступны ({ex})")
-
-    # НЕЗАВИСИМЫЙ резолв: гасим наши открытые позиции по факту резолва рынка, даже если цель
-    # уже вышла (редимнула) — иначе позиция висит вечно. Цены нет -> рынок мог зарезолвиться.
+    # --- (D) НЕЗАВИСИМЫЙ резолв: гасим позиции по факту резолва, даже если цель вышла раньше.
+    # Кандидаты: цены нет (стакан снесён) ИЛИ цена у края (0/1 — вероятно уже резолвнут). ---
     need: dict = {}
     for p in book["positions"].values():
         tok, cid = p["token"], p.get("cid")
         mk = marks.get(tok)
-        if cid and not (mk is not None and mk > 0):
+        stale = not (mk is not None and mk > 0)
+        extreme = (mk is not None and mk > 0) and (mk <= 0.005 or mk >= 0.995)
+        if cid and (stale or extreme):
             need.setdefault(cid, []).append(p)
     settled_n = 0
     for cid, plist in need.items():
-        res = _RES_CACHE.get(cid)
-        if res is None:
-            res = api.market_resolution(cid)
-            if res:
-                _RES_CACHE[cid] = res
+        res = _oracle(api, cid)
         if not res:
             continue
+        resolved_all.update(res)
         for p in list(plist):
             val = res.get(str(p["token"]))
             if val is not None:
@@ -760,6 +802,14 @@ def cycle(api: API, book: dict, wallets: list, per_trade: float, slippage: float
                 settled_n += 1
     if settled_n:
         print(f"независимый резолв: погашено {settled_n} зависших позиций", flush=True)
+
+    # добор резолвов ТЕНЕВЫХ записей (раньше их закрывали сканы позиций целей; теперь скан
+    # редкий, поэтому старейшие нерезолвнутые добираем оракулом, помалу за цикл)
+    pend = [r for r in book.get("skipped", []) if not r.get("resolved") and r.get("cid")]
+    for r in pend[:SHADOW_RESOLVE_PER_CYCLE]:
+        res = _oracle(api, r["cid"])
+        if res:
+            resolved_all.update(res)
 
     settle_shadow(book, resolved_all)                # теневой расчёт отфильтрованных сделок
     return marks
