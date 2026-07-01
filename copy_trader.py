@@ -93,6 +93,38 @@ def purge_blocked(book: dict) -> dict:
     book["topups"] = round(topups, 2)
     book["bankroll"] = round(base + topups, 2)
     book["cash"] = round(base + topups + realized - invested, 2)
+    book.pop("day_baseline", None)                        # снимок «за сегодня» устарел — начнём заново
+    return {"removed_positions": len(removed), "positions_left": len(book["positions"]),
+            "realized": book["realized"], "bankroll": book["bankroll"],
+            "cash": book["cash"], "topups": book["topups"]}
+
+
+def purge_wallet(book: dict, wallet: str) -> dict:
+    """Пересчёт книги «как будто этого кошелька никогда не было»: удаляет его позиции/лог/теневые
+    записи и заново сводит realized/bankroll/cash/topups (консистентно, режим автодолива)."""
+    addr = (wallet or "").lower()
+    base = 100000.0
+    removed = [k for k, p in book.get("positions", {}).items() if (p.get("wallet") or "").lower() == addr]
+    for k in removed:
+        book["positions"].pop(k, None)
+    book["log"] = [r for r in book.get("log", []) if (r.get("w") or "").lower() != addr]
+    book["skipped"] = [r for r in book.get("skipped", []) if (r.get("w") or "").lower() != addr]
+    book.get("seen", {}).pop(addr, None)
+    book.get("typical", {}).pop(addr, None)
+    book.get("thold", {}).pop(addr, None)
+    realized = sum((r.get("pnl") or 0) for r in book["log"] if "pnl" in r)
+    n_copied = sum(1 for r in book["log"] if r.get("act") == "BUY")
+    skipped_realized = sum((r.get("pnl") or 0) for r in book["skipped"] if r.get("resolved"))
+    invested = sum(p["cost"] for p in book["positions"].values())
+    topups = max(0.0, invested - realized - base)
+    book["realized"] = round(realized, 2)
+    book["n_copied"] = n_copied
+    book["n_skipped"] = len(book["skipped"])
+    book["skipped_realized"] = round(skipped_realized, 2)
+    book["topups"] = round(topups, 2)
+    book["bankroll"] = round(base + topups, 2)
+    book["cash"] = round(base + topups + realized - invested, 2)
+    book.pop("day_baseline", None)                       # снимок «за сегодня» устарел — начнём заново
     return {"removed_positions": len(removed), "positions_left": len(book["positions"]),
             "realized": book["realized"], "bankroll": book["bankroll"],
             "cash": book["cash"], "topups": book["topups"]}

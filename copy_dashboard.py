@@ -453,7 +453,7 @@ const flagBadge = f => f==="lead" ? '<span class="tag YES">лидер</span>'
   : f==="drop" ? '<span class="tag NO">на отсев</span>' : '<span class="muted">—</span>';
 const addrLink = a => '<span class="addr clk" onclick="openWallet(\''+a+'\')">'+shortAddr(a)+'</span>';
 async function removeWallet(a){
-  if(!confirm("Удалить кошелёк "+shortAddr(a)+"?\nКопирование новых сделок прекратится. Открытые позиции до-резолвятся сами.")) return;
+  if(!confirm("Удалить кошелёк "+shortAddr(a)+"?\nКнига пересчитается заново, как будто его никогда не было: все его позиции, сделки и PnL уберутся безвозвратно.")) return;
   let pw = localStorage.getItem("pw") || "";
   if(!pw){ pw = prompt("Пароль:") || ""; if(!pw) return; localStorage.setItem("pw", pw); }
   try{
@@ -857,8 +857,9 @@ def api_wallet():
 
 @app.route("/api/remove_wallet", methods=["POST"])
 def api_remove_wallet():
-    """Удалить кошелёк из watchlist (копирование новых сделок прекращается; открытые позиции
-    до-резолвятся сами через независимый оракул). Файл watchlist перечитывается на лету."""
+    """Удалить кошелёк из watchlist (копирование новых сделок прекращается) И пересчитать книгу
+    «как будто его никогда не было» (purge_wallet): убрать его позиции/сделки/теневые записи,
+    заново свести realized/bankroll/cash/topups. Файл watchlist перечитывается на лету."""
     data = request.get_json(silent=True) or {}
     if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
         return jsonify({"ok": False, "error": "auth"}), 401
@@ -881,7 +882,13 @@ def api_remove_wallet():
         sp.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
-    return jsonify({"ok": True, "removed": before - d["count"], "count": d["count"]})
+    with _lock:
+        purge = ct.purge_wallet(STATE["book"], addr)
+        try:
+            ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
+        except Exception:  # noqa: BLE001
+            pass
+    return jsonify({"ok": True, "removed": before - d["count"], "count": d["count"], **purge})
 
 
 @app.route("/api/purge_blocked", methods=["POST"])
