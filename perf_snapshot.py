@@ -54,7 +54,8 @@ def snapshot(t):
         "topups": d.get("topups"), "fill": fill_cost(t["state"]),
         "wallets": [{"w": w["wallet"], "src": w.get("source"), "real": w["realized"],
                      "unreal": w["unrealized"], "total": w["total"], "closed": w["closed"],
-                     "open": w.get("open_n"), "spent": w.get("spent"), "flag": w.get("flag")}
+                     "open": w.get("open_n"), "spent": w.get("spent"), "flag": w.get("flag"),
+                     "delay": w.get("delay")}
                     for w in d.get("per_wallet", [])],
     }
     with open(f"perf_history_{t['port']}.jsonl", "a", encoding="utf-8") as f:

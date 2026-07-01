@@ -99,12 +99,16 @@ def compute_stats(book: dict, marks: dict) -> dict:
     roi = pnl / book["bankroll"] if book["bankroll"] else 0.0
 
     stat = defaultdict(lambda: {"copied": 0, "closed": 0, "wins": 0, "realized": 0.0,
-                                "open_val": 0.0, "open_cost": 0.0, "spent": 0.0, "open_n": 0})
+                                "open_val": 0.0, "open_cost": 0.0, "spent": 0.0, "open_n": 0,
+                                "delay": 0.0})
     for r in book["log"]:
         w = r.get("w", "?")
         if r.get("act") == "BUY":
             stat[w]["copied"] += 1
             stat[w]["spent"] += r.get("spend", 0) or 0   # суммарно задействовано $ на эту цель
+            px, tp = r.get("px"), r.get("their_px")      # задержка-кост: переплата против цены цели
+            if px and tp and px > 0:
+                stat[w]["delay"] += (r.get("spend", 0) or 0) * (px - tp) / px
         if "pnl" in r:
             stat[w]["closed"] += 1
             stat[w]["realized"] += r["pnl"]
@@ -139,6 +143,7 @@ def compute_stats(book: dict, marks: dict) -> dict:
             "total": round(total, 2),
             "open_val": round(s["open_val"], 2),
             "spent": round(s["spent"], 2),
+            "delay": round(s["delay"], 2),            # $ переплаты за задержку копира на входах
             "flag": flag,
             "source": sources.get(w, "—"),
         })
@@ -180,6 +185,23 @@ def compute_stats(book: dict, marks: dict) -> dict:
             "roi": round((v - p["cost"]) / p["cost"], 4) if p["cost"] else 0.0,
         })
 
+    # ---- реал-леджер: что поймал бы НАСТОЯЩИЙ кэш (без доливов) ----
+    ra = book.get("realacct") or {}
+    real = None
+    if ra:
+        r_unreal = 0.0
+        for p in book["positions"].values():
+            rc, c = (p.get("rcost", 0.0) or 0.0), (p.get("cost", 0.0) or 0.0)
+            if rc > 0 and c > 0:
+                r_unreal += (mark_val(p) - c) * min(1.0, rc / c)
+        n_att = ra.get("taken", 0) + ra.get("missed", 0)
+        real = {"base": ra.get("base"), "cash": round(ra.get("cash", 0.0), 2),
+                "realized": round(ra.get("realized", 0.0), 2), "unrealized": round(r_unreal, 2),
+                "pnl": round(ra.get("realized", 0.0) + r_unreal, 2),
+                "taken": ra.get("taken", 0), "missed": ra.get("missed", 0),
+                "missed_pct": round(100.0 * ra.get("missed", 0) / n_att, 1) if n_att else 0.0,
+                "missed_spend": round(ra.get("missed_spend", 0.0), 2)}
+
     log = []
     for r in book["log"][-60:][::-1]:
         log.append({
@@ -202,6 +224,7 @@ def compute_stats(book: dict, marks: dict) -> dict:
         "total": round(total, 2),
         "pnl": round(pnl, 2),
         "pnl_today": pnl_today,
+        "real": real,
         "roi": roi,
         "n_copied": book["n_copied"],
         "n_skipped": book.get("n_skipped", 0),
@@ -377,7 +400,7 @@ PAGE = r"""<!doctype html>
 
   <div class="sec">По кошелькам — авто-ранжирование по форвардному PnL</div>
   <table>
-    <thead><tr><th>#</th><th>Кошелёк</th><th>Источник</th><th>Скопир.</th><th>Задейств.</th><th>Закрыто</th><th>Открыто</th><th>Винрейт</th><th>Реализ. PnL</th><th>Нереализ. PnL</th><th>PnL итого</th><th>За сегодня</th><th>Статус</th><th></th></tr></thead>
+    <thead><tr><th>#</th><th>Кошелёк</th><th>Источник</th><th>Скопир.</th><th>Задейств.</th><th>Закрыто</th><th>Открыто</th><th>Винрейт</th><th>Реализ. PnL</th><th>Нереализ. PnL</th><th>PnL итого</th><th>За сегодня</th><th title="переплата против цены цели из-за задержки копирования">Задержка$</th><th>Статус</th><th></th></tr></thead>
     <tbody id="wallets"></tbody>
   </table>
 
@@ -586,7 +609,7 @@ async function tick(){
   $("hero").className="hero num "+cls(d.pnl);
   $("hero").innerHTML = money(d.pnl)+'<span class="sub">итого PnL · реализ. '+money(d.realized)+' · '+(d.roi*100).toFixed(1)+'% от банкролла</span>';
 
-  $("cards").innerHTML = [
+  const cardsArr = [
     ["PnL за сегодня", money(d.pnl_today||0), cls(d.pnl_today||0)],
     ["Реализовано (закрытые)", money(d.realized), cls(d.realized)],
     ["Нереализ. PnL (открытые)", money(d.unrealized), cls(d.unrealized)],
@@ -597,7 +620,14 @@ async function tick(){
     ["Свободный кэш", money(d.cash), ""],
     ["Долито капитала", money(d.topups||0), ""],
     ["Банкролл (с доливами)", money(d.bankroll), ""],
-  ].map(c=>'<div class="card'+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+'</div>').join("");
+  ];
+  if(d.real){
+    cardsArr.splice(1, 0, ["Реал-PnL (кэш $"+((d.real.base||0)/1000).toFixed(1)+"k, без доливов)",
+                           money(d.real.pnl||0), cls(d.real.pnl||0)]);
+    cardsArr.push(["Пропущено входов (реал)", (d.real.missed||0)+" ("+(d.real.missed_pct||0)+"%)",
+                   (d.real.missed_pct>25?"neg":"")]);
+  }
+  $("cards").innerHTML = cardsArr.map(c=>'<div class="card'+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+'</div>').join("");
 
   sparkline(d.pnl_history);
 
@@ -614,9 +644,10 @@ async function tick(){
     '<td class="num '+cls(w.unrealized)+'">'+money(w.unrealized)+'</td>'+
     '<td class="num '+cls(w.total)+'">'+money(w.total)+(w.spent>0?' <span class="muted">('+(w.total/w.spent>=0?'+':'')+(w.total/w.spent*100).toFixed(0)+'%)</span>':'')+'</td>'+
     '<td class="num '+cls(w.today||0)+'">'+(w.today!=null?money(w.today):'—')+'</td>'+
+    '<td class="num '+((w.delay||0)>(w.spent||0)*0.02?"neg":"muted")+'">'+money(w.delay||0)+'</td>'+
     '<td>'+flagBadge(w.flag)+'</td>'+
     '<td><span class="del" title="удалить кошелёк" onclick="removeWallet(\''+w.wallet+'\')">✕</span></td></tr>').join("")
-    || '<tr><td colspan="14" class="empty">пока ничего не скопировано — ждём первые сделки целей</td></tr>';
+    || '<tr><td colspan="15" class="empty">пока ничего не скопировано — ждём первые сделки целей</td></tr>';
 
   $("open").innerHTML = (d.open_positions||[]).map(p=>{
     const pl = p.pnl!=null ? p.pnl : (p.val-p.cost);
@@ -961,6 +992,60 @@ def api_purge_blocked():
         except Exception:  # noqa: BLE001
             pass
     return jsonify({"ok": True, **res})
+
+
+# ----------------------------- отчёт для прополки -----------------------------
+_PH = {"mtime": 0, "then": {}, "t_then": 0}
+
+
+def _hist_then(days: float = 7.0) -> dict:
+    """Срез total по кошелькам ~N дней назад из perf_history (для тренда). Кэш по mtime файла."""
+    p = Path("perf_history_5000.jsonl")
+    try:
+        m = p.stat().st_mtime
+    except OSError:
+        return {}
+    if m != _PH["mtime"]:
+        target = time.time() - days * 86400
+        best = None
+        for line in p.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if rec.get("t", 0) >= target:              # первый снимок не старше N дней
+                best = rec
+                break
+        _PH.update({"mtime": m, "t_then": (best or {}).get("t", 0),
+                    "then": {(w.get("w") or "").lower(): (w.get("total") or 0)
+                             for w in (best or {}).get("wallets", [])}})
+    return _PH["then"]
+
+
+@app.route("/api/prune")
+def api_prune():
+    """Отчёт для еженедельной прополки: все форвардные метрики + задержка-кост + тренд ~7д.
+    Кандидат на отсев: total<0 И trend7d<0 И closed>=8; отдельно — у кого задержка съедает эдж."""
+    with _lock:
+        book = STATE["book"]
+        marks = dict(STATE["marks"])
+    data = compute_stats(book, marks)
+    then = _hist_then()
+    rows = []
+    for w in data["per_wallet"]:
+        addr = w["wallet"].lower()
+        d7 = round(w["total"] - then[addr], 2) if addr in then else None
+        verdict = ""
+        if w["closed"] >= 8:
+            if w["total"] < 0 and (d7 is None or d7 <= 0):
+                verdict = "отсев"                      # стабильно минусовой, тренд не спасает
+            elif w["total"] <= 0 and w["delay"] > abs(w["total"]):
+                verdict = "задержка-съедает"           # эдж есть, но не переживает копирование
+            elif w["total"] > 0:
+                verdict = "держать"
+        rows.append({**w, "trend7d": d7, "verdict": verdict})
+    rows.sort(key=lambda x: x["total"])               # худшие сверху — их и полем
+    return jsonify({"t_then": _PH["t_then"], "n": len(rows), "rows": rows})
 
 
 @app.route("/api/category")
