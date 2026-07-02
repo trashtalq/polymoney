@@ -1126,6 +1126,32 @@ def api_rescale():
     return jsonify({"ok": True, **res})
 
 
+@app.route("/api/set_source", methods=["POST"])
+def api_set_source():
+    """Переметить источник существующих кошельков (пароль в теле):
+    {pw, sources: {addr: "метка", ...}}. Только правка ярлыков в wallet_sources.json —
+    watchlist и книгу не трогает (метка видна в колонке «Источник»)."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    src_map = data.get("sources") or {}
+    if not isinstance(src_map, dict) or not src_map:
+        return jsonify({"ok": False, "error": "no sources"}), 400
+    sp = Path("wallet_sources.json")
+    try:
+        srcs = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
+    except Exception:  # noqa: BLE001
+        srcs = {}
+    n = 0
+    for w, label in src_map.items():
+        w = (w or "").lower().strip()
+        if w.startswith("0x") and len(w) == 42 and label:
+            srcs[w] = str(label)[:40]
+            n += 1
+    sp.write_text(json.dumps(srcs, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True, "updated": n})
+
+
 @app.route("/api/pause", methods=["POST"])
 def api_pause():
     """Стоп/старт копирования (пароль в теле): {pw, paused: true|false}.
