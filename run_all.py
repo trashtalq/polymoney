@@ -55,7 +55,8 @@ def shutdown(*_):
 
 
 def daily_scheduler():
-    """Раз в сутки гоняет авто-скан лидерборда (со встроенным исключением спорта).
+    """Раз в сутки: (1) авто-скан лидерборда; (2) РАЗВЕДЧИК — маркет-первый скан с ротацией
+    пулов по дню (--auto --apply пишет прошедших прямо в watchlist, hot-reload подхватит).
     Без cron — отдельным потоком супервизора. Первый запуск через 15 мин после старта."""
     if os.environ.get("DAILY_SCAN", "1") != "1":
         return
@@ -68,6 +69,13 @@ def daily_scheduler():
                                stdout=lg, stderr=lg)
         except Exception as e:  # noqa: BLE001
             print(f"[scheduler] daily_lb_scan ошибка: {e}", flush=True)
+        try:
+            with open(os.path.join(HERE, "discovery.log"), "ab") as lg:
+                subprocess.run([PY, "market_first_scan.py", "--auto", "--apply"], cwd=HERE,
+                               env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+                               stdout=lg, stderr=lg)
+        except Exception as e:  # noqa: BLE001
+            print(f"[scheduler] разведчик ошибка: {e}", flush=True)
         for _ in range(24 * 60):          # спим сутки, чутко к остановке
             if stopping:
                 return

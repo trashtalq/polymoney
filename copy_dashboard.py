@@ -1126,6 +1126,26 @@ def api_rescale():
     return jsonify({"ok": True, **res})
 
 
+@app.route("/api/discovery")
+def api_discovery():
+    """Что нашёл ночной разведчик: лог последнего прогона + прошедшие гейты + размер выборки.
+    Читается утренним агентом-куратором (и человеком) для отчёта."""
+    out = {"log": "", "adds": [], "results_n": 0}
+    try:
+        out["log"] = Path("market_first_scan.log").read_text(encoding="utf-8")[-8000:]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["adds"] = json.loads(Path("market_scan_adds.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["results_n"] = len(json.loads(Path("market_scan_results.json").read_text(encoding="utf-8")))
+    except Exception:  # noqa: BLE001
+        pass
+    return jsonify(out)
+
+
 @app.route("/api/set_source", methods=["POST"])
 def api_set_source():
     """Переметить источник существующих кошельков (пароль в теле):
