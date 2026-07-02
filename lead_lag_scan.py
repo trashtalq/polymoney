@@ -30,6 +30,8 @@ import copy_trader as ct
 import wallet_analyzer as wa
 from market_first_scan import (SLIP, NOTIONAL, winner_map, wallet_profile, SERVER)
 
+# === ПАРАМЕТРЫ ОХОТНИКА (секция самоулучшения: правит агент hunter-improver-weekly) ===
+# История правок — в git-логе этого файла. Менять В ПРЕДЕЛАХ разумного (не отключать гейты).
 N_LEADERS = 8            # сколько наших лучших разбираем
 MKTS_PER_LEADER = 20     # свежих рынков на лидера
 TRADES_PER_MARKET = 3000
@@ -37,6 +39,10 @@ MIN_EARLY_USD = 50       # минимум $ ранних покупок канд
 MIN_LEAD_SEC = 60        # раньше лидера минимум на минуту (иначе это со-копирование)
 MIN_HITS = 4             # кандидат интересен с этого числа рынков-опережений
 MAX_MARKETS_TOTAL = 150  # общий потолок рынков за прогон (бюджет запросов)
+LAG_SOURCE_MAX_H = 48    # лаг <= этого = «источник» (его реально копируют); больше = «ранняя-птица»
+                         # урок прогона 2026-07-03: лаг днями-неделями — это ранние птицы,
+                         # истинный lead-follow — минуты-часы; источники ценнее, идут первыми
+# ======================================================================================
 
 LOGF = Path("lead_lag_scan.log")
 
@@ -87,6 +93,8 @@ def leader_entries(api: wa.DataAPIClient, wl: str) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--push", action="store_true", help="залить прошедших на сервер (env POLY_PW)")
+    ap.add_argument("--apply", action="store_true",
+                    help="писать watchlist напрямую (ночной запуск НА СЕРВЕРЕ)")
     args = ap.parse_args()
     LOGF.write_text("", encoding="utf-8")
 
@@ -151,11 +159,15 @@ def main():
     for w, c in cand.items():
         if c["hits"] < MIN_HITS:
             continue
+        avg_lead = sum(c["lead_min"]) / len(c["lead_min"])
         rows.append({"wallet": w, "hits": c["hits"], "ahead_of": sorted(c["ahead_of"]),
                      "n_leaders": len(c["ahead_of"]),
-                     "avg_lead_min": round(sum(c["lead_min"]) / len(c["lead_min"]), 1),
+                     "avg_lead_min": round(avg_lead, 1),
+                     "kind": "источник" if avg_lead <= LAG_SOURCE_MAX_H * 60 else "ранняя-птица",
                      "sim_pnl": round(c["sim_pnl"], 2), "sim_wins": c["wins"]})
-    rows.sort(key=lambda r: (r["n_leaders"], r["hits"], r["sim_pnl"]), reverse=True)
+    # источники (короткий лаг — их реально копируют) выше ранних птиц при прочих равных
+    rows.sort(key=lambda r: (r["kind"] == "источник", r["n_leaders"], r["hits"], r["sim_pnl"]),
+              reverse=True)
     Path("lead_lag_results.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1),
                                              encoding="utf-8")
     log(f"кандидатов-«вышестоящих» (hits>={MIN_HITS}): {len(rows)}")
@@ -170,18 +182,30 @@ def main():
             continue
         r["trades_per_day"] = p["trades_per_day"]
         passed.append(r)
-        log(f"  + {r['wallet'][:10]}… раньше {r['n_leaders']} лидеров в {r['hits']} рынках, "
-            f"средний лаг {r['avg_lead_min']}мин, sim ${r['sim_pnl']}")
+        log(f"  + [{r['kind']}] {r['wallet'][:10]}… раньше {r['n_leaders']} лидеров в {r['hits']} "
+            f"рынках, средний лаг {r['avg_lead_min']}мин, sim ${r['sim_pnl']}")
         time.sleep(0.3)
     Path("lead_lag_adds.json").write_text(json.dumps(passed, ensure_ascii=False, indent=1),
                                           encoding="utf-8")
-    log(f"ИТОГ: прошли гейты {len(passed)}")
+    log(f"ИТОГ: прошли гейты {len(passed)} "
+        f"(источников {sum(1 for x in passed if x['kind'] == 'источник')})")
+    # леджер добычи (append): по нему hunter-improver оценивает, какая добыча работает в форварде
+    with open("hunter_ledger.jsonl", "a", encoding="utf-8") as f:
+        for x in passed:
+            f.write(json.dumps({"d": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                                "w": x["wallet"], "kind": x["kind"], "hits": x["hits"],
+                                "n_leaders": x["n_leaders"], "avg_lead_min": x["avg_lead_min"],
+                                "sim_pnl": x["sim_pnl"]}, ensure_ascii=False) + "\n")
 
+    # мандат пользователя 2026-07-03: добычу охотника доливать не спрашивая, метка «добыча-охотника»
+    if args.apply and passed:
+        from market_first_scan import apply_local
+        apply_local(passed, "добыча-охотника")
     if args.push and passed:
         pw = os.environ.get("POLY_PW", "")
         r = requests.post(f"{SERVER}/api/add_wallet",
                           json={"pw": pw, "wallets": [x["wallet"] for x in passed],
-                                "source": "lead-lag"}, timeout=30)
+                                "source": "добыча-охотника"}, timeout=30)
         log(f"push: {r.status_code} {r.json()}")
 
 

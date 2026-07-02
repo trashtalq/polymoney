@@ -1130,7 +1130,7 @@ def api_rescale():
 def api_discovery():
     """Что нашёл ночной разведчик: лог последнего прогона + прошедшие гейты + размер выборки.
     Читается утренним агентом-куратором (и человеком) для отчёта."""
-    out = {"log": "", "adds": [], "results_n": 0}
+    out = {"log": "", "adds": [], "results_n": 0, "hunter_log": "", "hunter_ledger": []}
     try:
         out["log"] = Path("market_first_scan.log").read_text(encoding="utf-8")[-8000:]
     except Exception:  # noqa: BLE001
@@ -1141,6 +1141,15 @@ def api_discovery():
         pass
     try:
         out["results_n"] = len(json.loads(Path("market_scan_results.json").read_text(encoding="utf-8")))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["hunter_log"] = Path("lead_lag_scan.log").read_text(encoding="utf-8")[-6000:]
+    except Exception:  # noqa: BLE001
+        pass
+    try:                                       # леджер добычи охотника (для агента-улучшателя)
+        lines = Path("hunter_ledger.jsonl").read_text(encoding="utf-8").splitlines()[-200:]
+        out["hunter_ledger"] = [json.loads(x) for x in lines if x.strip()]
     except Exception:  # noqa: BLE001
         pass
     return jsonify(out)

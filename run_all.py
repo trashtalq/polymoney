@@ -76,6 +76,13 @@ def daily_scheduler():
                                stdout=lg, stderr=lg)
         except Exception as e:  # noqa: BLE001
             print(f"[scheduler] разведчик ошибка: {e}", flush=True)
+        try:                                   # ОХОТНИК: добыча доливается сама (мандат 2026-07-03)
+            with open(os.path.join(HERE, "hunter.log"), "ab") as lg:
+                subprocess.run([PY, "lead_lag_scan.py", "--apply"], cwd=HERE,
+                               env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+                               stdout=lg, stderr=lg)
+        except Exception as e:  # noqa: BLE001
+            print(f"[scheduler] охотник ошибка: {e}", flush=True)
         for _ in range(24 * 60):          # спим сутки, чутко к остановке
             if stopping:
                 return
