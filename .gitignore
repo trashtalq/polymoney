@@ -41,3 +41,8 @@ paper_book_*.json
 paper_book_*.RETIRED.json
 .github/
 3.bat
+
+# indexbot (сигнал-бот ES): секреты и состояние
+indexbot/config.json
+indexbot/state.json
+core_book.json

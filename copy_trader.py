@@ -647,7 +647,11 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
     spend = min(want, room)                           # размер как прежде — кэш НЕ ограничивает (бумага)
     if spend < per_trade * MIN_BET_FRAC:
         return False                                 # нет места под потолком позиции
-    if book["cash"] < spend:                          # баланс не должен заканчиваться -> доливаем капитал
+    if book["cash"] < spend:
+        if book.get("hard_cash"):                     # ЖЁСТКИЙ депозит (core-группа): доливов НЕТ —
+            book["n_liq_skip"] = book.get("n_liq_skip", 0) + 1   # ждём резолвов, вход пропускаем
+            return _record_skip(book, e, base, "no_cash", per_trade, slippage, wallet)
+        # обычный режим: баланс не должен заканчиваться -> доливаем капитал
         deficit = spend - book["cash"]                # +deficit и в кэш, и в банкролл -> PnL($) не меняется
         book["bankroll"] += deficit
         book["cash"] += deficit
@@ -664,10 +668,12 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
                                   "fills": 1, "opened": ev_ts(e)}
     book["cash"] -= spend
     book["n_copied"] += 1
-    took = _real_buy(book, key, spend)               # реал-леджер: хватило бы настоящего кэша?
-    book["log"].append({"t": ev_ts(e), "w": wallet, "act": "BUY", "px": round(px, 4),
-                        "their_px": round(ev_price(e), 4), "spend": round(spend, 2),
-                        "out": ev_outcome(e), "title": ev_title(e)[:46], "r": int(took)})
+    rec = {"t": ev_ts(e), "w": wallet, "act": "BUY", "px": round(px, 4),
+           "their_px": round(ev_price(e), 4), "spend": round(spend, 2),
+           "out": ev_outcome(e), "title": ev_title(e)[:46]}
+    if not book.get("hard_cash"):                    # реал-леджер ведём только в основной книге
+        rec["r"] = int(_real_buy(book, key, spend))  # (core-книга сама и есть жёсткий кэш)
+    book["log"].append(rec)
     return True
 
 

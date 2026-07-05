@@ -44,8 +44,32 @@ STATE = {
     "marks": {},
     "status": {"started_at": int(time.time()), "last_poll": 0, "polling": False,
                "error": "", "n_polls": 0, "wallets": 0},
+    # CORE-ГРУППА: отдельная книга по когорте core-реал с ЖЁСТКИМ депозитом (без доливов)
+    "core_book": None,
+    "core_book_ver": 0,
+    "core_marks": {},
+    "core_status": {"started_at": int(time.time()), "last_poll": 0, "polling": False,
+                    "error": "", "n_polls": 0, "wallets": 0},
     "cfg": {},
 }
+
+
+def _slot(g: str):
+    """Ключи STATE для группы: 'core' -> core-книга, иначе основная."""
+    if g == "core":
+        return "core_book", "core_marks", "core_status", "core_book_ver", "core_state_file"
+    return "book", "marks", "status", "book_ver", "state_file"
+
+
+def _core_wallets() -> list:
+    """Состав core-группы: кошельки с ярлыком core-реал (и всё ещё в watchlist).
+    Перечитывается каждый цикл -> смена ярлыка меняет группу без рестарта."""
+    try:
+        srcs = get_sources()
+        wl = get_watchlist()
+        return [w for w, lbl in srcs.items() if lbl == "core-реал" and (not wl or w in wl)]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 # ----------------------------- источник кошелька (какой скан нашёл) -----------------------------
@@ -254,15 +278,19 @@ def _reload_wallets(wl_path, fallback):
         return fallback
 
 
-def poll_loop(api, wallets, per_trade, slippage, interval, state_file, wl_path=None):
+def poll_loop(api, wallets, per_trade, slippage, interval, state_file, wl_path=None, g="main"):
+    bk, mk_, stt, ver, _sf = _slot(g)
     while True:
         try:
-            wallets = _reload_wallets(wl_path, wallets)     # перечитываем список целей каждый цикл
+            if g == "core":
+                wallets = _core_wallets() or wallets        # группа = ярлык core-реал (горячо)
+            else:
+                wallets = _reload_wallets(wl_path, wallets)  # перечитываем список целей каждый цикл
             with _lock:
-                STATE["status"]["polling"] = True
-                STATE["status"]["wallets"] = len(wallets)
-                ver0 = STATE["book_ver"]                    # версия книги на момент снимка
-                working = copy.deepcopy(STATE["book"])
+                STATE[stt]["polling"] = True
+                STATE[stt]["wallets"] = len(wallets)
+                ver0 = STATE[ver]                           # версия книги на момент снимка
+                working = copy.deepcopy(STATE[bk])
             # сам цикл (API-запросы) — БЕЗ блокировки, чтобы страница не висла
             marks = ct.cycle(api, working, wallets, per_trade, slippage)
             # точка для кривой PnL
@@ -276,25 +304,25 @@ def poll_loop(api, wallets, per_trade, slippage, interval, state_file, wl_path=N
             if len(hist) > 2000:
                 del hist[:len(hist) - 2000]
             with _lock:
-                if STATE["book_ver"] != ver0:
+                if STATE[ver] != ver0:
                     # книгу правили извне (purge/удаление кошелька) пока мы опрашивали API —
                     # наш снимок устарел, коммитить его нельзя (иначе откатим правку). Пропускаем
                     # цикл целиком, на следующем круге просто повторим (seen не продвинулись).
-                    STATE["status"]["polling"] = False
-                    STATE["status"]["error"] = ""
+                    STATE[stt]["polling"] = False
+                    STATE[stt]["error"] = ""
                 else:
-                    STATE["book"] = working
-                    STATE["marks"] = marks
-                    STATE["status"]["last_poll"] = int(time.time())
-                    STATE["status"]["n_polls"] += 1
-                    STATE["status"]["polling"] = False
-                    STATE["status"]["error"] = ""
+                    STATE[bk] = working
+                    STATE[mk_] = marks
+                    STATE[stt]["last_poll"] = int(time.time())
+                    STATE[stt]["n_polls"] += 1
+                    STATE[stt]["polling"] = False
+                    STATE[stt]["error"] = ""
                     ct.save_book(state_file, working)
         except Exception as e:  # noqa: BLE001
             with _lock:
-                STATE["status"]["error"] = str(e)
-                STATE["status"]["polling"] = False
-            print(f"[poll error] {e}", flush=True)
+                STATE[stt]["error"] = str(e)
+                STATE[stt]["polling"] = False
+            print(f"[poll error {g}] {e}", flush=True)
         time.sleep(interval)
 
 
@@ -360,6 +388,17 @@ PAGE = r"""<!doctype html>
        background:rgba(255,194,61,.07);border:1px solid rgba(255,194,61,.35);
        box-shadow:0 0 18px rgba(255,194,61,.10)}
   .pausebar.show{display:block}
+  .tabs{display:flex;gap:8px;margin:16px 0 2px}
+  .tab{cursor:pointer;font:inherit;font-size:12px;font-weight:800;letter-spacing:1.2px;
+       text-transform:uppercase;color:var(--muted);background:rgba(10,18,30,.55);
+       border:1px solid var(--border);border-radius:10px 10px 0 0;padding:9px 18px;
+       border-bottom:none;transition:all .15s}
+  .tab:hover{color:var(--text)}
+  .tab.on{color:var(--accent);background:linear-gradient(180deg,rgba(6,229,255,.10),rgba(10,18,30,.6));
+       border-color:var(--border2);text-shadow:0 0 10px rgba(6,229,255,.4);
+       box-shadow:0 -6px 18px rgba(6,229,255,.06)}
+  .tab .sub{font-weight:500;letter-spacing:.4px;text-transform:none;color:var(--muted);font-size:11px}
+  body.coreview .del{display:none}   /* состав core-группы меняется ярлыком, не удалением */
   .heroLabel{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:2.5px;margin-bottom:6px}
   .hero{font-size:58px;font-weight:800;letter-spacing:-2px;line-height:1;margin:0}
   .hero.pos{background:linear-gradient(100deg,#8dffe0,var(--green) 45%,var(--accent));
@@ -479,7 +518,12 @@ PAGE = r"""<!doctype html>
     </div>
   </header>
 
-  <div class="heroLabel">Итого PnL — форвард</div>
+  <div class="tabs">
+    <button class="tab on" id="tabMain" onclick="setGrp('main')">Общая группа</button>
+    <button class="tab" id="tabCore" onclick="setGrp('core')">Core-реал <span class="sub">· жёсткий депозит</span></button>
+  </div>
+
+  <div class="heroLabel" id="heroLabel">Итого PnL — форвард</div>
   <div class="hero num" id="hero">—</div>
   <div class="chips" id="chips"></div>
   <div class="pausebar" id="pausebar">⏸ Копирование остановлено — новые входы не берутся; выходы, резолвы и оценка позиций работают</div>
@@ -570,6 +614,19 @@ PAGE = r"""<!doctype html>
 
 <script>
 const $ = id => document.getElementById(id);
+// --- группы: main (общая, с доливами) / core (когорта core-реал, жёсткий депозит) ---
+let G = localStorage.getItem("grp") || "main";
+const qs  = () => G==="core" ? "?g=core" : "";
+const qsa = () => G==="core" ? "&g=core" : "";
+function paintTabs(){
+  $("tabMain").className = "tab"+(G==="main"?" on":"");
+  $("tabCore").className = "tab"+(G==="core"?" on":"");
+  document.body.classList.toggle("coreview", G==="core");
+  $("heroLabel").textContent = G==="core"
+    ? "CORE-РЕАЛ — жёсткий депозит, без доливов (кончился кэш — ждём резолвов)"
+    : "Итого PnL — форвард";
+}
+function setGrp(g){ G=g; localStorage.setItem("grp",g); paintTabs(); closeWallet(); closeSkipped(); tick(); }
 const money = v => (v<0?"-":"")+"$"+Math.abs(v).toLocaleString("en-US",{maximumFractionDigits:0});
 const cls = v => v>0.005?"pos":(v<-0.005?"neg":"zero");
 const ago = ts => { if(!ts) return "—"; const s=Math.floor(Date.now()/1000-ts);
@@ -620,7 +677,7 @@ function closeWallet(){ curWallet=null; $("wmodal").classList.remove("show"); }
 async function openWallet(a){ curWallet=a; $("wmodal").classList.add("show"); await loadWallet(); }
 async function loadWallet(){
   if(!curWallet) return;
-  let d; try{ d=await (await fetch("/api/wallet?addr="+curWallet)).json(); }catch(e){ return; }
+  let d; try{ d=await (await fetch("/api/wallet?addr="+curWallet+qsa())).json(); }catch(e){ return; }
   $("wtitle").innerHTML = shortAddr(d.wallet)+' &nbsp;<span class="rtag">'+(d.source||"—")+'</span> '+
     '&nbsp;<a class="addr" href="https://polymarket.com/profile/'+d.wallet+'" target="_blank">профиль ↗</a>';
   $("wsum").innerHTML = [
@@ -732,7 +789,7 @@ function sparkline(hist){
 
 async function tick(){
   let d;
-  try{ d=await (await fetch("/api/state")).json(); }
+  try{ d=await (await fetch("/api/state"+qs())).json(); }
   catch(e){ $("status").innerHTML="сервер недоступен"; return; }
   const st=d.status||{};
   _paused = !!d.paused;
@@ -789,6 +846,10 @@ async function tick(){
       cardsArr.push(["До $2k/мес", "копим статистику ("+ad+"д/5д)", "", "", "feat"]);
     }
   }
+  if(d.group==="core"){
+    cardsArr.push(["Пропущено без кэша (ждём резолвов)", d.n_liq_skip||0,
+                   (d.n_liq_skip>0?"neg":""), "", "feat"]);
+  }
   $("cards").innerHTML = cardsArr.map(c=>'<div class="card'+(c[4]?' '+c[4]:'')+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v num '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+'</div>').join("");
 
   sparkline(d.pnl_history);
@@ -838,7 +899,7 @@ async function tick(){
     '<td class="title">'+(r.title||"")+'</td><td>'+v+'</td></tr>';}).join("")
     || '<tr><td colspan="6" class="empty">журнал пуст</td></tr>';
 }
-const REASON_LBL = {band:"цена у края", adverse:"догон от цели", avg_up:"догон вверх", cap:"потолок позиции", sport:"футбол/спорт", weather:"погода"};
+const REASON_LBL = {band:"цена у края", adverse:"догон от цели", avg_up:"догон вверх", cap:"потолок позиции", sport:"футбол/спорт", weather:"погода", no_cash:"нет кэша (ждём резолвов)"};
 let skipOpen=false;
 function closeSkipped(){ skipOpen=false; $("modal").classList.remove("show"); }
 async function openSkipped(){
@@ -847,7 +908,7 @@ async function openSkipped(){
 }
 async function loadSkipped(){
   let d;
-  try{ d=await (await fetch("/api/skipped")).json(); }
+  try{ d=await (await fetch("/api/skipped"+qs())).json(); }
   catch(e){ $("skiprows").innerHTML='<tr><td colspan="9" class="empty">не удалось загрузить</td></tr>'; return; }
   const reasons = Object.entries(d.by_reason||{}).map(([k,v])=>(REASON_LBL[k]||k)+": "+v).join(" · ") || "—";
   const wr = d.resolved_n ? Math.round(100*d.wins/d.resolved_n)+"%" : "—";
@@ -885,7 +946,7 @@ async function loadSkipped(){
       '<td>'+spc+'</td></tr>';
   }).join("") || '<tr><td colspan="9" class="empty">отфильтрованных сделок пока нет</td></tr>';
 }
-tick(); setInterval(tick, 10000);
+paintTabs(); tick(); setInterval(tick, 10000);
 setInterval(()=>{ if(skipOpen) loadSkipped(); }, 10000);
 setInterval(()=>{ if(curWallet) loadWallet(); }, 10000);
 </script>
@@ -900,21 +961,27 @@ def index():
 
 @app.route("/api/state")
 def api_state():
+    bk, mk_, stt, _v, _sf = _slot(request.args.get("g", ""))
     with _lock:
-        book = STATE["book"]
-        marks = dict(STATE["marks"])
-        status = dict(STATE["status"])
+        book = STATE[bk]
+        marks = dict(STATE[mk_])
+        status = dict(STATE[stt])
+    if book is None:
+        return jsonify({"error": "group not running"}), 503
     data = compute_stats(book, marks)
     data["status"] = status
+    data["group"] = "core" if bk == "core_book" else "main"
+    data["n_liq_skip"] = book.get("n_liq_skip", 0)
     return jsonify(data)
 
 
 @app.route("/api/skipped")
 def api_skipped():
     """Журнал отфильтрованных сделок + теневой PnL: что было бы, если бы фильтр их пропустил."""
+    bk, mk_, _s, _v, _sf = _slot(request.args.get("g", ""))
     with _lock:
-        book = STATE["book"]
-        marks = dict(STATE["marks"])
+        book = STATE[bk] or {"skipped": [], "skipped_realized": 0.0}
+        marks = dict(STATE[mk_])
     sk = list(book.get("skipped", []))
     realized = book.get("skipped_realized", 0.0)
     open_pnl = 0.0
@@ -968,9 +1035,10 @@ def api_skipped():
 def api_wallet():
     """Детализация по одному кошельку: скопированные сделки + открытые позиции."""
     addr = (request.args.get("addr") or "").lower()
+    bk, mk_, _s, _v, _sf = _slot(request.args.get("g", ""))
     with _lock:
-        book = STATE["book"]
-        marks = dict(STATE["marks"])
+        book = STATE[bk] or {"positions": {}, "log": [], "skipped": []}
+        marks = dict(STATE[mk_])
 
     def mark_val(p):
         mk = marks.get(p["token"])
@@ -1098,6 +1166,13 @@ def api_remove_wallet():
             ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
         except Exception:  # noqa: BLE001
             pass
+        if STATE.get("core_book") is not None:      # из core-книги кошелёк тоже выпиливается начисто
+            ct.purge_wallet(STATE["core_book"], addr)
+            STATE["core_book_ver"] += 1
+            try:
+                ct.save_book(STATE.get("core_state_file", "core_book.json"), STATE["core_book"])
+            except Exception:  # noqa: BLE001
+                pass
     return jsonify({"ok": True, "removed": before - d["count"], "count": d["count"], **purge})
 
 
@@ -1189,13 +1264,20 @@ def api_pause():
     data = request.get_json(silent=True) or {}
     if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
         return jsonify({"ok": False, "error": "auth"}), 401
-    with _lock:
+    with _lock:                          # пауза — общий рубильник: действует на ОБЕ книги
         STATE["book"]["paused"] = bool(data.get("paused"))
         STATE["book_ver"] += 1          # снимок в полёте у poll_loop устарел — не даём затереть флаг
         try:
             ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
         except Exception:  # noqa: BLE001
             pass
+        if STATE.get("core_book") is not None:
+            STATE["core_book"]["paused"] = bool(data.get("paused"))
+            STATE["core_book_ver"] += 1
+            try:
+                ct.save_book(STATE.get("core_state_file", "core_book.json"), STATE["core_book"])
+            except Exception:  # noqa: BLE001
+                pass
         paused = STATE["book"]["paused"]
     return jsonify({"ok": True, "paused": paused})
 
@@ -1406,7 +1488,24 @@ def main():
                          daemon=True)
     t.start()
 
+    # CORE-ГРУППА: отдельная книга по когорте core-реал с ЖЁСТКИМ депозитом (без доливов).
+    # Кончился кэш -> входы пропускаются (reason=no_cash), ждём резолвов. Свой опросный
+    # контур из ~8 кошельков — дешёвый и более свежий, чем основной.
+    core_bankroll = float(os.environ.get("CORE_BANKROLL", "15000"))
+    core_state = os.environ.get("CORE_STATE", "core_book.json")
+    core_book = ct.load_book(core_state, core_bankroll)
+    core_book["hard_cash"] = True                    # флаг живёт в книге (см. copy_buy)
+    STATE["core_book"] = core_book
+    STATE["core_state_file"] = core_state
+    api2 = ct.API()
+    t2 = threading.Thread(target=poll_loop,
+                          args=(api2, _core_wallets(), args.per_trade, args.slippage,
+                                max(30, args.interval // 2), core_state, None, "core"),
+                          daemon=True)
+    t2.start()
+
     print(f"дашборд: http://localhost:{args.port}  | целей {len(wallets)}, опрос каждые {args.interval}s")
+    print(f"core-группа: депозит ${core_bankroll:,.0f} (жёсткий), книга {core_state}")
     print("первый цикл зафиксирует старт (копирование со второго). Ctrl+C для остановки.")
     app.run(host=args.host, port=args.port, threaded=True)
 
