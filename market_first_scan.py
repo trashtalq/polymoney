@@ -22,9 +22,10 @@ market_first_scan.log (лог прогона — отдаётся дашборд
 """
 import argparse
 import json
+import math
 import random
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -78,6 +79,8 @@ LIVE_DAYS = 14           # живость: последняя сделка не 
 TOP_ADD = 25             # столько лучших добавляем за прогон
 MAX_MED_HOLD_DAYS = 10   # медианное время вход->резолв: капитал должен ОБОРАЧИВАТЬСЯ (дни)
 MAX_TRADES_PER_DAY = 100 # гиперактивные (погодные брекеты по 1к позиций/день и т.п.) — не берём
+FDR_Q = 0.10             # контроль ложных открытий (Benjamini-Hochberg): сканируем тысячи
+                         # кошельков, сырой ci_low>0 даёт ~5% ложняка НА КАЖДОГО -> q-value
 
 LOGF = Path("market_first_scan.log")
 
@@ -206,6 +209,7 @@ def scan(mkts: list[dict], s: requests.Session) -> list[dict]:
         except Exception as ex:  # noqa: BLE001
             log(f"  {m['cid'][:10]}… trades недоступны ({ex})")
             continue
+        tot_usd = tot_sz = 0.0
         for t in trades:
             if (t.get("side") or "").upper() != "BUY":
                 continue
@@ -213,10 +217,16 @@ def scan(mkts: list[dict], s: requests.Session) -> list[dict]:
             px, sz = wa._f(t, "price"), wa._f(t, "size")
             if not w or not (0 < px < 1) or sz <= 0:
                 continue
+            tot_usd += px * sz
+            tot_sz += sz
             a = acc[w][str(t.get("asset") or "")]
             a[0] += px * sz
             a[1] += sz
             a[2] += px * sz * wa._f(t, "timestamp")
+        # ВЕС РЫНКА: победа на крупном СПОРНОМ рынке информативнее победы на пустыре/однозначном.
+        # contested = 4p(1-p) по средней цене сэмпла (угадать 50/50 >> купить очевидные 0.95)
+        pbar = (tot_usd / tot_sz) if tot_sz > 0 else 0.5
+        wmkt = math.log1p(max(0.0, m.get("vol") or tot_usd)) * max(0.05, 4.0 * pbar * (1.0 - pbar))
         for w, toks in acc.items():
             tok, (usd, qty, usdts) = max(toks.items(), key=lambda kv: kv[1][0])
             if usd < MIN_STANCE_USD or qty <= 0:
@@ -229,33 +239,141 @@ def scan(mkts: list[dict], s: requests.Session) -> list[dict]:
                 continue
             pnl = NOTIONAL * (val / entry - 1.0) if val > 0 else -NOTIONAL
             hold = max(0.0, (m["ts"] - usdts / usd) / 86400)
-            sims[w].append((round(pnl, 3), round(hold, 1)))
+            sims[w].append((round(pnl, 3), round(hold, 1), round(wmkt, 3)))
         done += 1
         if done % 25 == 0:
             log(f"рынки {done}/{len(mkts)}, кошельков в пуле {len(sims)}")
 
-    rows = []
+    rows = score_rows(sims)
+    Path("market_scan_results.json").write_text(
+        json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+    log(f"оценено кошельков (>= {MIN_MARKETS} рынков): {len(rows)}; q<= {FDR_Q}: "
+        f"{sum(1 for r in rows if r['q'] <= FDR_Q)}")
+    return rows
+
+
+def _betacf(a, b, x):
+    """Продолженная дробь для неполной беты (Numerical Recipes)."""
+    MAXIT, EPS, FPMIN = 200, 3e-12, 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = FPMIN if abs(d) < FPMIN else d
+    d = 1.0 / d
+    h = d
+    for m in range(1, MAXIT + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = FPMIN if abs(d) < FPMIN else d
+        c = 1.0 + aa / c
+        c = FPMIN if abs(c) < FPMIN else c
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = FPMIN if abs(d) < FPMIN else d
+        c = 1.0 + aa / c
+        c = FPMIN if abs(c) < FPMIN else c
+        d = 1.0 / d
+        de = d * c
+        h *= de
+        if abs(de - 1.0) < EPS:
+            break
+    return h
+
+
+def _ibeta(a, b, x):
+    """Регуляризованная неполная бета I_x(a,b)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    ln = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+          + a * math.log(x) + b * math.log(1.0 - x))
+    bt = math.exp(ln)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def t_sf(t: float, df: float) -> float:
+    """Односторонний хвост Стьюдента P(T > t). Аналитический p вместо бутстрапного:
+    бутстрап упирается в пол 1/(BOOT_N+1) и BH-поправка на тысячи кошельков глохнет."""
+    if t < 0:
+        return 1.0 - t_sf(-t, df)
+    x = df / (df + t * t)
+    return 0.5 * _ibeta(df / 2.0, 0.5, x)
+
+
+def score_rows(sims: dict) -> list[dict]:
+    """Скоринг: взвешенное по весам рынков среднее + бутстрап-p + ЭБ-усадка + BH-FDR.
+    sims: wallet -> [(pnl, hold_days, w_mkt), ...].
+    - взвешенное среднее: победы на весомых рынках значат больше;
+    - p (односторонний, бутстрап): вероятность такого эджа при нулевом;
+    - eb_mean: эмпирико-байесовская усадка среднего к популяционному — «100% на 6 рынках»
+      стягивается к реальности пропорционально малости выборки;
+    - q (Benjamini-Hochberg): контроль доли ложных открытий по ВСЕЙ просканированной
+      популяции — ответ на множественное тестирование тысяч кошельков за прогон."""
+    prelim = []
     for w, recs in sims.items():
         n = len(recs)
         if n < MIN_MARKETS:
             continue
-        pl = [p for p, _h in recs]
-        holds = sorted(h for _p, h in recs)
+        pl = [p for p, _h, _w in recs]
+        wts = [max(1e-9, x) for _p, _h, x in recs]
+        holds = sorted(h for _p, h, _w in recs)
+        mean = sum(pl) / n
+        var = sum((x - mean) ** 2 for x in pl) / max(1, n - 1)
+        wmean = sum(p * x for p, x in zip(pl, wts)) / sum(wts)
         boots = []
         for _ in range(BOOT_N):
-            sample = [random.choice(pl) for _ in range(n)]
-            boots.append(sum(sample) / n)
+            idx = [random.randrange(n) for _ in range(n)]
+            bw = sum(wts[i] for i in idx)
+            boots.append(sum(pl[i] * wts[i] for i in idx) / bw)
         boots.sort()
-        rows.append({"wallet": w, "n_markets": n, "wins": sum(1 for x in pl if x > 0),
-                     "sim_pnl": round(sum(pl), 2), "sim_mean": round(sum(pl) / n, 3),
-                     "ci_low": round(boots[int(0.05 * BOOT_N)], 3),
-                     "med_hold_days": holds[n // 2]})
-    rows.sort(key=lambda r: r["ci_low"], reverse=True)
-    Path("market_scan_results.json").write_text(
-        json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
-    log(f"оценено кошельков (>= {MIN_MARKETS} рынков): {len(rows)}; ci_low>0: "
-        f"{sum(1 for r in rows if r['ci_low'] > 0)}")
-    return rows
+        sd = math.sqrt(var)
+        if sd < 1e-9:                                  # все исходы одинаковые
+            p = 1e-9 if wmean > 0 else 1.0
+        else:
+            p = t_sf(wmean / (sd / math.sqrt(n)), n - 1)
+        prelim.append({"wallet": w, "n_markets": n, "wins": sum(1 for x in pl if x > 0),
+                       "sim_pnl": round(sum(pl), 2), "sim_mean": round(mean, 3),
+                       "w_mean": round(wmean, 3), "var": var,
+                       "p": max(p, 1e-12),
+                       "ci_low": round(boots[int(0.05 * BOOT_N)], 3),
+                       "med_hold_days": holds[n // 2]})
+    if not prelim:
+        return []
+    # --- эмпирико-байесовская усадка: prior из самой популяции (метод моментов) ---
+    means = [r["w_mean"] for r in prelim]
+    grand = sum(means) / len(means)
+    sw_num = sum((r["n_markets"] - 1) * r["var"] for r in prelim)
+    sw_den = sum(r["n_markets"] - 1 for r in prelim)
+    s2w = max(1e-9, sw_num / max(1, sw_den))                      # внутрикошельковый шум
+    var_means = sum((x - grand) ** 2 for x in means) / max(1, len(means) - 1)
+    mean_inv_n = sum(1.0 / r["n_markets"] for r in prelim) / len(prelim)
+    # межкошельковый разброс; ПОЛ в 10% наблюдаемого разброса средних: в популяции из 99% шума
+    # метод моментов уводит s2b в 0 и prior схлопывает ВСЕХ (включая настоящих) в среднее.
+    # Открытия делает FDR (q), EB-усадка — для ранжирования/сайзинга, ей нельзя быть вырожденной.
+    s2b = max(1e-9, 0.10 * var_means, var_means - s2w * mean_inv_n)
+    for r in prelim:
+        prec = r["n_markets"] / s2w
+        r["eb_mean"] = round((r["w_mean"] * prec + grand / s2b) / (prec + 1.0 / s2b), 3)
+        del r["var"]
+    # --- BH-FDR по всем оценённым ---
+    order = sorted(range(len(prelim)), key=lambda i: prelim[i]["p"])
+    n_all = len(prelim)
+    qv = [0.0] * n_all
+    prev = 1.0
+    for rank_from_end in range(n_all, 0, -1):
+        i = order[rank_from_end - 1]
+        q = min(prev, prelim[i]["p"] * n_all / rank_from_end)
+        qv[i] = q
+        prev = q
+    for i, r in enumerate(prelim):
+        r["q"] = round(qv[i], 4)
+    prelim.sort(key=lambda r: (r["eb_mean"], -r["q"]), reverse=True)
+    return prelim
 
 
 def wallet_profile(s: requests.Session, addr: str) -> dict:
@@ -273,16 +391,28 @@ def wallet_profile(s: requests.Session, addr: str) -> dict:
         span = int(tr[0].get("timestamp", 0)) - int(tr[-1].get("timestamp", 0))
         if span > 3600:
             rate = len(tr) / (span / 86400)
-    return {"live": live, "blocked_share": blocked, "trades_per_day": round(rate, 1)}
+    # энтропия часа суток: у людей циркадные дыры (сон), у ботов равномерные 24/7.
+    # Высокая энтропия + высокий темп = бот; сам по себе ни один признак не приговор.
+    hent = 0.0
+    if len(tr) >= 50:
+        cnt = Counter((int(e.get("timestamp") or 0) // 3600) % 24 for e in tr)
+        tot = sum(cnt.values())
+        hent = -sum((c / tot) * math.log(c / tot) for c in cnt.values()) / math.log(24)
+    bot = bool(len(tr) >= 50 and hent > 0.965 and rate > 30)
+    return {"live": live, "blocked_share": blocked, "trades_per_day": round(rate, 1),
+            "hour_entropy": round(hent, 3), "bot": bot}
 
 
 def gate(rows: list[dict], s: requests.Session, have: set) -> list[dict]:
-    """Гейты: ci_low>0, винрейт>=50%, быстрый оборот, не в списке, живой, не спорт, не бот."""
+    """Гейты: FDR q<=порога + ЭБ-среднее>0, винрейт>=50%, быстрый оборот, не в списке,
+    живой, не спорт, не гиперактивный, не бот (энтропия часа)."""
     adds = []
     for r in rows:
         if len(adds) >= TOP_ADD:
             break
-        if r["ci_low"] <= 0 or r["wins"] / r["n_markets"] < 0.5 or r["wallet"] in have:
+        if r.get("q", 1.0) > FDR_Q or r.get("eb_mean", 0) <= 0:
+            continue
+        if r["wins"] / r["n_markets"] < 0.5 or r["wallet"] in have:
             continue
         if r["med_hold_days"] > MAX_MED_HOLD_DAYS:
             log(f"  {r['wallet'][:10]}… медленный оборот (медиана {r['med_hold_days']}д) — мимо")
@@ -296,10 +426,14 @@ def gate(rows: list[dict], s: requests.Session, have: set) -> list[dict]:
         if p["trades_per_day"] > MAX_TRADES_PER_DAY:
             log(f"  {r['wallet'][:10]}… гиперактивный ({p['trades_per_day']}/день) — мимо")
             continue
+        if p["bot"]:
+            log(f"  {r['wallet'][:10]}… бот-паттерн (энтропия часа {p['hour_entropy']}, "
+                f"{p['trades_per_day']}/д) — мимо")
+            continue
         adds.append(r)
         log(f"  + {r['wallet'][:10]}… рынков {r['n_markets']}, винрейт "
-            f"{100 * r['wins'] // r['n_markets']}%, sim ${r['sim_pnl']}, ci_low {r['ci_low']}, "
-            f"оборот {r['med_hold_days']}д, темп {p['trades_per_day']}/д")
+            f"{100 * r['wins'] // r['n_markets']}%, sim ${r['sim_pnl']}, eb {r['eb_mean']}, "
+            f"q {r['q']}, оборот {r['med_hold_days']}д, темп {p['trades_per_day']}/д")
         time.sleep(0.3)
     return adds
 

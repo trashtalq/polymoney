@@ -22,6 +22,7 @@ SERVICES = {
                   "--bankroll", BANKROLL, "--per-trade", PER_TRADE, "--interval", INTERVAL,
                   "--state", "paper_book.json", "--port", PORT, "--host", HOST],
     "snapshot": [PY, "perf_snapshot.py"],
+    "feed": [PY, "trade_feed.py"],     # глобальная лента сделок -> trades.db (event store)
 }
 
 procs: dict = {}

@@ -46,3 +46,8 @@ paper_book_*.RETIRED.json
 indexbot/config.json
 indexbot/state.json
 core_book.json
+
+# event store глобальной ленты сделок (сервер-owned, растёт)
+trades.db
+trades.db-wal
+trades.db-shm

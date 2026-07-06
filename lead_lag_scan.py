@@ -178,7 +178,7 @@ def main():
         if r["sim_pnl"] <= 0:
             continue
         p = wallet_profile(s, r["wallet"])
-        if not p["live"] or p["blocked_share"] >= 0.6 or p["trades_per_day"] > 100:
+        if not p["live"] or p["blocked_share"] >= 0.6 or p["trades_per_day"] > 100 or p.get("bot"):
             continue
         r["trades_per_day"] = p["trades_per_day"]
         passed.append(r)
