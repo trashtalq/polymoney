@@ -60,7 +60,15 @@ POOLS = {
 POOL_ORDER = ("politics", "macro", "world", "crypto", "wide")
 
 MAX_MARKETS = 250        # потолок рынков на прогон
-TRADES_PER_MARKET = 2000 # потолок сделок с рынка (DESC: последние; band-фильтр правит поздних)
+TRADES_PER_MARKET = 2000 # базовый потолок сделок с рынка (DESC: последние)
+# АДАПТИВНАЯ ГЛУБИНА: на крупных рынках ранние умные входы не попадают в хвост из 2к последних
+# сделок — копаем глубже пропорционально объёму (там и сидят лучшие).
+def trades_cap(vol: float) -> int:
+    if vol >= 500_000:
+        return 6000
+    if vol >= 100_000:
+        return 4000
+    return TRADES_PER_MARKET
 MIN_STANCE_USD = 50      # минимум $ покупок кошелька в рынке, чтобы засчитать позицию
 SLIP = 0.01              # наш слиппедж на входе (как в копире)
 NOTIONAL = 10.0          # $ на симулированный вход (масштаб /10)
@@ -194,7 +202,7 @@ def scan(mkts: list[dict], s: requests.Session) -> list[dict]:
             continue
         acc: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: [0.0, 0.0, 0.0]))  # w->tok->[usd,qty,usd*ts]
         try:
-            trades = api.trades_for_market(m["cid"], max_trades=TRADES_PER_MARKET)
+            trades = api.trades_for_market(m["cid"], max_trades=trades_cap(m.get("vol", 0)))
         except Exception as ex:  # noqa: BLE001
             log(f"  {m['cid'][:10]}… trades недоступны ({ex})")
             continue
