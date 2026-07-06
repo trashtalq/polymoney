@@ -1227,6 +1227,30 @@ def api_discovery():
         out["hunter_ledger"] = [json.loads(x) for x in lines if x.strip()]
     except Exception:  # noqa: BLE001
         pass
+    try:                                       # здоровье глобальной ленты сделок (trade_feed)
+        import sqlite3
+        dbp = os.environ.get("TRADES_DB", "trades.db")
+        if Path(dbp).exists():
+            con = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True, timeout=5)
+            now = int(time.time())
+            n = con.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+            d24 = con.execute("SELECT COUNT(*) FROM trades WHERE ts >= ?", (now - 86400,)).fetchone()[0]
+            last = con.execute("SELECT MAX(ts) FROM trades").fetchone()[0] or 0
+            con.close()
+            out["feed"] = {"trades": n, "last_24h": d24,
+                           "lag_s": (now - last) if last else None,
+                           "db_mb": round(Path(dbp).stat().st_size / 1e6, 1)}
+        else:
+            out["feed"] = None                 # лента ещё не стартовала
+    except Exception:  # noqa: BLE001
+        out["feed"] = None
+    try:                                       # хвост ВЕЧНОГО журнала добавлений (когорты до/после)
+        lines = Path("adds_history.jsonl").read_text(encoding="utf-8").splitlines()
+        out["adds_history_n"] = len(lines)
+        out["adds_recent"] = [json.loads(x) for x in lines[-20:] if x.strip()]
+    except Exception:  # noqa: BLE001
+        out["adds_history_n"] = 0
+        out["adds_recent"] = []
     return jsonify(out)
 
 
@@ -1317,6 +1341,14 @@ def api_add_wallet():
         srcs[w] = label
     try:
         sp.write_text(json.dumps(srcs, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    try:                                                       # вечный журнал добавлений (когорты)
+        with open("adds_history.jsonl", "a", encoding="utf-8") as f:
+            for w in new:
+                f.write(json.dumps({"t": int(time.time()), "date": time.strftime("%Y-%m-%d"),
+                                    "source": label, "via": "http", "wallet": w},
+                                   ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001
         pass
     return jsonify({"ok": True, "added": len(new), "dup": sum(1 for w in ws if w in have),

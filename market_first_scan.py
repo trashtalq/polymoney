@@ -453,6 +453,18 @@ def load_have() -> set:
     return have
 
 
+def log_adds_history(entries: list[dict], source: str, via: str):
+    """ВЕЧНЫЙ журнал добавлений (append-only): когда/откуда/с какими метриками кошелёк
+    вошёл в систему. База когортного сравнения «фильтр до/после изменений» — adds-файлы
+    перезаписываются каждым прогоном, а этот журнал не трогает никто."""
+    ts = int(time.time())
+    with open("adds_history.jsonl", "a", encoding="utf-8") as f:
+        for e in entries:
+            rec = {"t": ts, "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                   "source": source, "via": via, **e}
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
 def apply_local(adds: list[dict], source: str):
     """Прямая запись в watchlist/sources (для запуска НА СЕРВЕРЕ: hot-reload подхватит)."""
     if not adds:
@@ -473,6 +485,11 @@ def apply_local(adds: list[dict], source: str):
     for w in new:
         srcs[w] = source
     sp.write_text(json.dumps(srcs, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        newset = set(new)
+        log_adds_history([a for a in adds if a["wallet"] in newset], source, "apply")
+    except Exception as ex:  # noqa: BLE001
+        log(f"adds_history не записался: {ex}")
     log(f"APPLY: добавлено в watchlist {len(new)} (дублей/удалённых пропущено {len(adds) - len(new)})")
 
 

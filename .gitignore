@@ -51,3 +51,4 @@ core_book.json
 trades.db
 trades.db-wal
 trades.db-shm
+adds_history.jsonl
