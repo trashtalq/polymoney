@@ -882,7 +882,7 @@ async function tick(){
     '<td class="num '+cls(w.unrealized)+'">'+money(w.unrealized)+'</td>'+
     '<td class="num '+cls(w.total)+'">'+money(w.total)+(w.spent>0?' <span class="muted">('+(w.total/w.spent>=0?'+':'')+(w.total/w.spent*100).toFixed(0)+'%)</span>':'')+'</td>'+
     '<td class="num '+cls(w.today||0)+'">'+(w.today!=null?money(w.today):'—')+'</td>'+
-    '<td class="num '+((w.delay||0)>(w.spent||0)*0.02?"neg":"muted")+'">'+money(w.delay||0)+'</td>'+
+    '<td class="num '+((w.delay||0)>(w.spent||0)*0.02?"neg":((w.delay||0)<-0.005?"pos":"muted"))+'" title="плюс (красный) = переплатили из-за задержки копира; минус (зелёный) = вошли ЛУЧШЕ цены цели — задержка сыграла за нас">'+money(w.delay||0)+'</td>'+
     '<td>'+flagBadge(w.flag)+'</td>'+
     '<td><span class="del" title="удалить кошелёк" onclick="removeWallet(\''+w.wallet+'\')">✕</span></td></tr>').join("")
     || '<tr><td colspan="15" class="empty">пока ничего не скопировано — ждём первые сделки целей</td></tr>';
@@ -1289,6 +1289,42 @@ def api_set_source():
             n += 1
     sp.write_text(json.dumps(srcs, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify({"ok": True, "updated": n})
+
+
+@app.route("/api/shadow_audit")
+def api_shadow_audit():
+    """Аудит фильтров по теневому журналу: что каждый фильтр отсеивает и что это стоило бы.
+    Суммы — на теневой нотионал ($1/вход); ev10 = средний PnL на вход при ставке $10.
+    Журнал скользящий (последние ~3000 отсевов) — это свежий срез, не вся история."""
+    bk, mk_, _s, _v, _sf = _slot(request.args.get("g", ""))
+    with _lock:
+        book = STATE[bk] or {"skipped": []}
+        marks = dict(STATE[mk_])
+    from collections import defaultdict
+    agg = defaultdict(lambda: {"n": 0, "resolved": 0, "wins": 0, "real": 0.0,
+                               "open_pnl": 0.0, "open_n": 0})
+    for r in book.get("skipped", []):
+        a = agg[r.get("reason", "?")]
+        a["n"] += 1
+        if r.get("resolved"):
+            a["resolved"] += 1
+            p = r.get("pnl") or 0
+            a["real"] += p
+            a["wins"] += 1 if p > 0 else 0
+        else:
+            mk = marks.get(r.get("tok"))
+            if mk and mk > 0 and r.get("qty") and r.get("notional"):
+                a["open_pnl"] += r["qty"] * mk - r["notional"]
+                a["open_n"] += 1
+    out = {}
+    for k, a in agg.items():
+        ev = (a["real"] / a["resolved"]) if a["resolved"] else None
+        out[k] = {"n": a["n"], "resolved": a["resolved"], "wins": a["wins"],
+                  "wr": round(100.0 * a["wins"] / a["resolved"], 1) if a["resolved"] else None,
+                  "shadow_real": round(a["real"], 2),
+                  "ev10": round(ev * 10, 2) if ev is not None else None,
+                  "open_pnl": round(a["open_pnl"], 2), "open_n": a["open_n"]}
+    return jsonify(out)
 
 
 @app.route("/api/materialize", methods=["POST"])
