@@ -824,7 +824,11 @@ async function tick(){
     ["Отфильтровано (защита EV)", d.n_skipped||0, "", "skip"],
     ["Свободный кэш", money(d.cash), ""],
     ["Долито капитала", money(d.topups||0), ""],
-    ["Банкролл (с доливами)", money(d.bankroll), ""],
+    // банкролл + живая дельта: (+/-PnL) и «всего денег с учётом вложенного» (кэш + оценка позиций)
+    ["Банкролл (с доливами)",
+     money(d.bankroll)+' <span style="font-size:14px" class="'+cls(d.pnl)+'">('
+       +(d.pnl>=0?'+':'')+money(d.pnl)+')</span>',
+     "", "", "", "всего с позициями: "+money(d.total)],
   ];
   if(d.real){
     cardsArr.splice(1, 0, ["Реал-PnL (кэш $"+((d.real.base||0)/1000).toFixed(1)+"k, без доливов)",
@@ -850,7 +854,7 @@ async function tick(){
     cardsArr.push(["Пропущено без кэша (ждём резолвов)", d.n_liq_skip||0,
                    (d.n_liq_skip>0?"neg":""), "", "feat"]);
   }
-  $("cards").innerHTML = cardsArr.map(c=>'<div class="card'+(c[4]?' '+c[4]:'')+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v num '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+'</div>').join("");
+  $("cards").innerHTML = cardsArr.map(c=>'<div class="card'+(c[4]?' '+c[4]:'')+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v num '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+(c[5]?'<div class="hint" style="color:var(--muted)">'+c[5]+'</div>':'')+'</div>').join("");
 
   sparkline(d.pnl_history);
 
