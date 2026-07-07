@@ -1291,6 +1291,41 @@ def api_set_source():
     return jsonify({"ok": True, "updated": n})
 
 
+@app.route("/api/materialize", methods=["POST"])
+def api_materialize():
+    """Пересчёт отсевов «как сошедшихся» (пароль в теле): avg_up + mention-рынки из теневого
+    журнала -> в книгу стандартной ставкой. body: {pw, g: ""|"core", per_trade?}.
+    Резолвы добираем оракулом ДО лока (сеть), материализуем под локом (мгновенно)."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    bk, _m, _s, ver, sf = _slot(data.get("g", ""))
+    per_trade = float(data.get("per_trade") or STATE["cfg"].get("per_trade") or 10)
+    # фаза 1: без лока собираем cid кандидатов без резолва и добираем исходы оракулом
+    with _lock:
+        book = STATE[bk]
+        cids = list({r.get("cid") for r in book.get("skipped", [])
+                     if r.get("cid") and not r.get("resolved")
+                     and (r.get("reason") == "avg_up"
+                          or (r.get("reason") == "sport"
+                              and ct._blocked_reason(r.get("title") or "") is None))})
+    api = ct.API()
+    resolved: dict = {}
+    for cid in cids[:400]:                             # потолок на вызов (сетевой бюджет)
+        res = ct._oracle(api, cid)
+        if res:
+            resolved[cid] = res
+    # фаза 2: материализация под локом, резолвер — только из кэша (без сети)
+    with _lock:
+        out = ct.materialize_skips(STATE[bk], per_trade, resolver=resolved.get)
+        STATE[ver] += 1
+        try:
+            ct.save_book(STATE.get(sf, "paper_book.json"), STATE[bk])
+        except Exception:  # noqa: BLE001
+            pass
+    return jsonify({"ok": True, "checked_cids": len(cids), "resolved_now": len(resolved), **out})
+
+
 @app.route("/api/pause", methods=["POST"])
 def api_pause():
     """Стоп/старт копирования (пароль в теле): {pw, paused: true|false}.

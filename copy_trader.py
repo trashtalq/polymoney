@@ -69,10 +69,22 @@ WEATHER_KW = (
 )
 
 
+# Медиа-рынки «скажут слово X N раз» (комментаторы/трансляция) — НЕ спорт-скилл:
+# исход не зависит от игры, эджу цели ничего не мешает. Исключение из спорт-фильтра
+# (решение пользователя 2026-07-08).
+MENTION_KW = ("say", "said", "mention")
+
+
+def _is_mention(t: str) -> bool:
+    return any(k in t for k in MENTION_KW) and "time" in t     # "...say X 5+ times..."
+
+
 def _blocked_reason(title: str):
     """Возвращает 'sport'/'weather' если рынок не копируем, иначе None."""
     t = (title or "").lower()
     if any(k in t for k in SPORT_MARKET_KW):
+        if _is_mention(t):
+            return None                                # mention-рынок: спорт-фильтр не про него
         return "sport"
     if any(k in t for k in WEATHER_KW):
         return "weather"
@@ -138,6 +150,63 @@ def purge_wallet(book: dict, wallet: str) -> dict:
     return {"removed_positions": len(removed), "positions_left": len(book["positions"]),
             "realized": book["realized"], "bankroll": book["bankroll"],
             "cash": book["cash"], "topups": book["topups"]}
+
+
+def materialize_skips(book: dict, per_trade: float, resolver=None) -> dict:
+    """Пересчёт отсевов «как сошедшихся»: avg_up-отсевы и mention-рынки (ошибочно резались
+    спорт-фильтром до 2026-07-08) переносятся из ТЕНЕВОГО журнала в КНИГУ, как будто были
+    скопированы стандартной ставкой per_trade (теневой PnL линеен по нотионалу — масштабируем).
+    Берём только РЕЗОЛВНУТЫЕ (resolver(cid)->{token: val} добирает исходы); нерезолвнутые
+    остаются в тени до следующего вызова. Реал-леджер НЕ трогаем (честность: настоящий кэш
+    этих входов не видел)."""
+    sel, keep = [], []
+    for r in book.get("skipped", []):
+        rsn = r.get("reason")
+        t = r.get("title") or ""
+        match = (rsn == "avg_up") or (rsn == "sport" and _blocked_reason(t) is None)
+        if not match:
+            keep.append(r)
+            continue
+        if not r.get("resolved") and resolver is not None and r.get("cid"):
+            res = resolver(r["cid"])
+            val = res.get(str(r.get("tok"))) if res else None
+            if val is not None:                        # рынок сошёлся — фиксируем теневой исход
+                r["resolved"] = True
+                r["val"] = val
+                r["pnl"] = round(r["qty"] * val - r["notional"], 2)
+                book["skipped_realized"] = book.get("skipped_realized", 0.0) + r["pnl"]
+        if r.get("resolved") and r.get("pnl") is not None and (r.get("notional") or 0) > 0:
+            sel.append(r)
+        else:
+            keep.append(r)                             # ещё не сошёлся — ждёт следующего пересчёта
+
+    added = 0.0
+    db = book.get("day_baseline")
+    for r in sel:
+        pnl = round(r["pnl"] * per_trade / r["notional"], 2)
+        added += pnl
+        book["log"].append({"t": r.get("t", int(time.time())), "w": r.get("w", ""),
+                            "act": "SETTLE", "val": r.get("val"), "pnl": pnl,
+                            "out": r.get("outcome", ""), "title": (r.get("title") or "")[:46],
+                            "mat": 1})                 # метка «материализован из тени»
+        book["skipped_realized"] = round(book.get("skipped_realized", 0.0) - (r.get("pnl") or 0), 2)
+        if db and isinstance(db.get("per_wallet"), dict):
+            w = r.get("w", "")                         # PnL старый -> в «сегодня» не выпирает
+            db["per_wallet"][w] = round(db["per_wallet"].get(w, 0.0) + pnl, 2)
+    book["realized"] = round(book.get("realized", 0.0) + added, 2)
+    book["cash"] = round(book.get("cash", 0.0) + added, 2)
+    if book["cash"] < 0:                               # минус закрываем доливом (режим без лимита)
+        deficit = -book["cash"]
+        book["bankroll"] = round(book["bankroll"] + deficit, 2)
+        book["topups"] = round(book.get("topups", 0.0) + deficit, 2)
+        book["cash"] = 0.0
+    book["skipped"] = keep
+    book["n_skipped"] = len(keep)
+    pending = sum(1 for r in keep
+                  if r.get("reason") == "avg_up"
+                  or (r.get("reason") == "sport" and _blocked_reason(r.get("title") or "") is None))
+    return {"materialized": len(sel), "pnl_added": round(added, 2), "pending_unresolved": pending,
+            "wins": sum(1 for r in sel if (r.get("pnl") or 0) > 0)}
 
 
 def rescale_book(book: dict, factor: float) -> dict:
