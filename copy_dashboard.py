@@ -118,8 +118,8 @@ def compute_stats(book: dict, marks: dict) -> dict:
     invested_open = sum(p["cost"] for p in book["positions"].values())
     unrealized = open_val - invested_open
     realized = book["realized"]
-    total = book["cash"] + open_val
-    pnl = total - book["bankroll"]
+    equity = book["cash"] + open_val                 # все деньги книги: кэш + оценка позиций
+    pnl = equity - book["bankroll"]
     roi = pnl / book["bankroll"] if book["bankroll"] else 0.0
 
     stat = defaultdict(lambda: {"copied": 0, "closed": 0, "wins": 0, "realized": 0.0,
@@ -148,7 +148,9 @@ def compute_stats(book: dict, marks: dict) -> dict:
     per_wallet = []
     for w, s in stat.items():
         unreal = s["open_val"] - s["open_cost"]
-        total = s["realized"] + unreal                # форвардный PnL цели в $ (реализ.+нереализ.)
+        # форвардный PnL цели в $ (реализ.+нереализ.). НЕ называть total — уже было затенение:
+        # имя перезаписывало equity книги, и в API утекал PnL последнего кошелька цикла.
+        wl_total = s["realized"] + unreal
         # надёжный вердикт: судим по РЕАЛИЗОВАННОМУ (нереализ. шумит у hold-to-resolution),
         # и только когда закрыто достаточно сделок. Нереализ. — лишь слабый довесок.
         score = s["realized"] + 0.3 * unreal
@@ -164,7 +166,7 @@ def compute_stats(book: dict, marks: dict) -> dict:
             "open_n": s["open_n"],
             "realized": round(s["realized"], 2),
             "unrealized": round(unreal, 2),
-            "total": round(total, 2),
+            "total": round(wl_total, 2),
             "open_val": round(s["open_val"], 2),
             "spent": round(s["spent"], 2),
             "delay": round(s["delay"], 2),            # $ переплаты за задержку копира на входах
@@ -247,7 +249,7 @@ def compute_stats(book: dict, marks: dict) -> dict:
         "unrealized": round(unrealized, 2),
         "invested_open": round(invested_open, 2),
         "open_val": round(open_val, 2),
-        "total": round(total, 2),
+        "total": round(equity, 2),
         "pnl": round(pnl, 2),
         "pnl_today": pnl_today,
         "real": real,
