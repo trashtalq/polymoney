@@ -851,6 +851,11 @@ async function tick(){
     }
   }
   if(d.group==="core"){
+    // время работы core-книги с минуты запуска (started фиксируется при создании книги)
+    const up = Math.max(0, Math.floor(Date.now()/1000 - (d.started||0)));
+    const dd = Math.floor(up/86400), hh = Math.floor((up%86400)/3600), mm = Math.floor((up%3600)/60);
+    cardsArr.push(["Время работы", (dd>0?dd+"д ":"")+hh+"ч "+mm+"м", "", "", "feat",
+                   "старт: "+tm(d.started||0)]);
     cardsArr.push(["Пропущено без кэша (ждём резолвов)", d.n_liq_skip||0,
                    (d.n_liq_skip>0?"neg":""), "", "feat"]);
   }
