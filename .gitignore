@@ -52,3 +52,7 @@ trades.db
 trades.db-wal
 trades.db-shm
 adds_history.jsonl
+
+# РЕАЛЬНЫЕ ДЕНЬГИ — приватный ключ и состояние исполнителя НИКОГДА в репо
+polymarket.env
+live_exec_state.json

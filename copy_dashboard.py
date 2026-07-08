@@ -1291,6 +1291,27 @@ def api_set_source():
     return jsonify({"ok": True, "updated": n})
 
 
+@app.route("/api/signals")
+def api_signals():
+    """Сигналы для ЛОКАЛЬНОГО исполнителя реальных денег: BUY-входы книги новее since.
+    Ключей/секретов тут нет — только что купила бумага (данные и так публичны в чейне).
+    По умолчанию g=core (реал копирует ядро). Поля: t, w, tok, cid, px, spend, out, title."""
+    bk, _m, stt, _v, _sf = _slot(request.args.get("g", "core"))
+    since = int(request.args.get("since", 0) or 0)
+    with _lock:
+        book = STATE[bk] or {"log": []}
+        status = dict(STATE[stt])
+        paused = bool(book.get("paused", False))
+        sigs = [r for r in book.get("log", [])[-500:]
+                if r.get("act") == "BUY" and r.get("t", 0) > since and r.get("tok")]
+    return jsonify({"now": int(time.time()), "paused": paused,
+                    "last_poll": status.get("last_poll", 0),
+                    "signals": [{"t": r["t"], "w": r.get("w", ""), "tok": r["tok"],
+                                 "cid": r.get("cid", ""), "px": r.get("px"),
+                                 "spend": r.get("spend"), "out": r.get("out", ""),
+                                 "title": r.get("title", "")} for r in sigs[-100:]]})
+
+
 @app.route("/api/shadow_audit")
 def api_shadow_audit():
     """Аудит фильтров по теневому журналу: что каждый фильтр отсеивает и что это стоило бы.

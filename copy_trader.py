@@ -741,7 +741,8 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
     book["n_copied"] += 1
     rec = {"t": ev_ts(e), "w": wallet, "act": "BUY", "px": round(px, 4),
            "their_px": round(ev_price(e), 4), "spend": round(spend, 2),
-           "out": ev_outcome(e), "title": ev_title(e)[:46]}
+           "out": ev_outcome(e), "title": ev_title(e)[:46],
+           "tok": tok, "cid": ev_cid(e)}                 # для реального исполнителя (ордер по token_id)
     if not book.get("hard_cash"):                    # реал-леджер ведём только в основной книге
         rec["r"] = int(_real_buy(book, key, spend))  # (core-книга сама и есть жёсткий кэш)
     book["log"].append(rec)
