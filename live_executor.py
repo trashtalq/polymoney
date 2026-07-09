@@ -332,11 +332,13 @@ def main():
     max_age = int(cfg.get("MAX_AGE_SEC") or 300)     # старше — не копируем (цена уехала)
     max_entries = int(cfg.get("MAX_ENTRIES_PER_POS") or 2)   # не больше N входов в одну позу
     max_per_wallet = float(cfg.get("MAX_PER_WALLET_DAY") or 5)  # не больше $X/день на один кошелёк
-    max_resolve_days = float(cfg.get("MAX_RESOLVE_DAYS") or 7)  # не входить в рынки с резолвом дальше N дней
+    max_resolve_days = float(cfg.get("MAX_RESOLVE_DAYS") or 0)  # 0 = БЕЗ фильтра резолва (капитал
+    #   освобождают ВЫХОДЫ вслед за целью, не пред-фильтр; цели флипают и долгие рынки)
     exit_min_frac = float(cfg.get("EXIT_MIN_FRAC") or 0.5)      # выходим, если цель продала >= этой доли
 
+    rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
     print(f"=== live_executor | MODE={mode.upper()} | депозит ${deposit} | ставка ${per_trade} | "
-          f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | резолв <={max_resolve_days:g}д | "
+          f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | резолв {rezolv} | "
           f"до {max_entries}x в позу | ВЫХОДЫ вслед за целью (>={exit_min_frac:g}) ===", flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
 
