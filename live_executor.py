@@ -26,6 +26,7 @@ live_executor.py — ЛОКАЛЬНЫЙ исполнитель реальных 
   python live_executor.py                       — стартует в dry (сделок нет)
 """
 import json
+import math
 import os
 import sys
 import time
@@ -166,7 +167,10 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 return
 
             # --- РЕАЛЬНЫЙ РЫНОЧНЫЙ ОРДЕР: BUY на per_trade $, FAK, потолок цены ---
-            cap = min(max_price, round(px + 0.03, 3))   # не платим сильно выше сигнала
+            # потолок = цена сигнала + ~2 цента, ОКРУГЛЁННЫЙ ВВЕРХ ДО ЦЕНТА (2 знака): рынки с
+            # шагом 0.01 требуют максимум 2 знака после запятой (иначе tick-size ошибка и ордер
+            # не проходит — так терялось ~2/3 сигналов). 2-значная цена конформна и тику 0.001.
+            cap = min(max_price, math.ceil((px + 0.02) * 100 - 1e-9) / 100)
             try:
                 resp = client.place_market_order(
                     token_id=sig["tok"], side="BUY", amount=float(per_trade),
