@@ -50,7 +50,8 @@ def load_env():
                 cfg[k.strip()] = v.strip().strip('"').strip("'")
     cfg.update({k: v for k, v in os.environ.items() if k in (
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
-        "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC")})
+        "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
+        "MAX_ENTRIES_PER_POS")})
     return cfg
 
 
@@ -84,10 +85,12 @@ def resp_ok(resp):
     return True                                      # исключения не было -> считаем принятым
 
 
-def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age):
+def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
+             max_entries):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     state = st_load()
+    pos_count = state.setdefault("pos_count", {})     # tok -> сколько раз уже входили (лимит на позу)
     smoke_done = False
     primed = False                                    # форвард на КАЖДОМ запуске, не только первом
 
@@ -141,6 +144,10 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 print(f"  skip (цена {px} вне 0..{max_price}): {title}", flush=True)
                 state["done"].append(k)
                 continue
+            if pos_count.get(sig["tok"], 0) >= max_entries:   # в одну позу не больше N раз
+                print(f"  skip (уже входили {max_entries}x в эту позу): {title}", flush=True)
+                state["done"].append(k)
+                continue
             if state["spent_total"] + per_trade > deposit:
                 print(f"  СТОП: депозит ${deposit} исчерпан (потрачено ${state['spent_total']:.2f})",
                       flush=True)
@@ -157,6 +164,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
 
             if mode == "dry":
                 print(f"  [DRY] купил бы: {line}", flush=True)
+                pos_count[sig["tok"]] = pos_count.get(sig["tok"], 0) + 1   # чтобы dry честно показал лимит
                 state["done"].append(k)
                 continue
 
@@ -180,6 +188,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                       flush=True)
                 if ok:
                     state["done"].append(k)
+                    pos_count[sig["tok"]] = pos_count.get(sig["tok"], 0) + 1   # +1 вход в позу
                     state["spent_total"] = round(state["spent_total"] + per_trade, 2)
                     state["spent_day"] = round(state["spent_day"] + per_trade, 2)
                     smoke_done = True
@@ -208,14 +217,16 @@ def main():
     max_price = float(cfg.get("MAX_PRICE") or 0.92)
     poll = int(cfg.get("POLL_SEC") or 30)
     max_age = int(cfg.get("MAX_AGE_SEC") or 300)     # старше — не копируем (цена уехала)
+    max_entries = int(cfg.get("MAX_ENTRIES_PER_POS") or 2)   # не больше N входов в одну позу
 
-    print(f"=== live_executor | MODE={mode.upper()} | депозит ${deposit} | "
-          f"ставка ${per_trade} | дневной лимит ${daily_max} | свежесть <={max_age//60}мин ===",
+    print(f"=== live_executor | MODE={mode.upper()} | депозит ${deposit} | ставка ${per_trade} | "
+          f"дневной лимит ${daily_max} | свежесть <={max_age//60}мин | до {max_entries}x в позу ===",
           flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
 
     if mode == "dry":
-        run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age)
+        run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
+                 max_entries)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -240,7 +251,8 @@ def main():
         return
     print(f"кошелёк-депозит: {funder}", flush=True)
     with client:                                     # SDK-клиент как контекст (сессия/очистка)
-        run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age)
+        run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
+                 max_entries)
 
 
 if __name__ == "__main__":
