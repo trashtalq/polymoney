@@ -69,6 +69,29 @@ def sig_key(sig):
     return f"{sig['t']}|{sig['tok']}"
 
 
+def fetch_held(s, funder):
+    """Реальные вложения по токенам с кошелька (data-api): {asset: $ вложено}. Основа лимита
+    входов в позу — берётся с ЧЕЙНА, поэтому переживает рестарт и видит входы, сделанные до
+    фикса/другим кодом. None при ошибке (тогда используем прошлый снимок)."""
+    try:
+        pos = s.get(f"https://data-api.polymarket.com/positions?user={funder}&limit=300",
+                    timeout=20).json()
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(pos, list):
+        return None
+    out = {}
+    for p in pos:
+        a = str(p.get("asset") or "")
+        if not a:
+            continue
+        cost = p.get("initialValue")
+        if cost is None:
+            cost = (p.get("size") or 0) * (p.get("avgPrice") or 0)
+        out[a] = out.get(a, 0.0) + float(cost or 0)
+    return out
+
+
 def resp_ok(resp):
     """Успех ордера по ответу нового SDK (OrderResponse — типизированный объект, не dict)."""
     for attr in ("success",):
@@ -86,13 +109,15 @@ def resp_ok(resp):
 
 
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-             max_entries):
+             max_entries, funder):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     state = st_load()
-    pos_count = state.setdefault("pos_count", {})     # tok -> сколько раз уже входили (лимит на позу)
+    session_add = {}          # tok -> $ добавлено ЭТИМ процессом (страхует settle-лаг чейна)
+    held = {}                 # tok -> $ реально вложено с кошелька (обновляется каждый цикл)
     smoke_done = False
     primed = False                                    # форвард на КАЖДОМ запуске, не только первом
+    cap_usd = max_entries * per_trade                 # потолок $ на одну позу (напр. 2×$1=$2)
 
     while True:
         try:
@@ -121,6 +146,13 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             time.sleep(poll)
             continue
 
+        if funder:                                   # реальные вложения по токенам (для лимита позы)
+            h = fetch_held(s, funder)
+            if h is not None:
+                held = h
+            session_add = {}                         # held теперь авторитетен за прошлые циклы ->
+            #                                          счётчик сеанса покрывает только этот цикл
+
         today = time.strftime("%Y-%m-%d")
         if state.get("day") != today:                # новый день -> сброс дневного счётчика
             state["day"] = today
@@ -144,8 +176,11 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 print(f"  skip (цена {px} вне 0..{max_price}): {title}", flush=True)
                 state["done"].append(k)
                 continue
-            if pos_count.get(sig["tok"], 0) >= max_entries:   # в одну позу не больше N раз
-                print(f"  skip (уже входили {max_entries}x в эту позу): {title}", flush=True)
+            # лимит на позу по РЕАЛЬНОМУ вложению (чейн + входы этого цикла) — не больше cap_usd
+            deployed = held.get(sig["tok"], 0.0) + session_add.get(sig["tok"], 0.0)
+            if deployed + per_trade > cap_usd + 1e-6:
+                print(f"  skip (в этой позе уже ~${deployed:.2f}, лимит ${cap_usd:.2f}): {title}",
+                      flush=True)
                 state["done"].append(k)
                 continue
             if state["spent_total"] + per_trade > deposit:
@@ -164,7 +199,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
 
             if mode == "dry":
                 print(f"  [DRY] купил бы: {line}", flush=True)
-                pos_count[sig["tok"]] = pos_count.get(sig["tok"], 0) + 1   # чтобы dry честно показал лимит
+                session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade  # dry-превью лимита
                 state["done"].append(k)
                 continue
 
@@ -188,7 +223,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                       flush=True)
                 if ok:
                     state["done"].append(k)
-                    pos_count[sig["tok"]] = pos_count.get(sig["tok"], 0) + 1   # +1 вход в позу
+                    session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade
                     state["spent_total"] = round(state["spent_total"] + per_trade, 2)
                     state["spent_day"] = round(state["spent_day"] + per_trade, 2)
                     smoke_done = True
@@ -226,7 +261,7 @@ def main():
 
     if mode == "dry":
         run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-                 max_entries)
+                 max_entries, (cfg.get("FUNDER") or "").strip())
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -252,7 +287,7 @@ def main():
     print(f"кошелёк-депозит: {funder}", flush=True)
     with client:                                     # SDK-клиент как контекст (сессия/очистка)
         run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-                 max_entries)
+                 max_entries, funder)
 
 
 if __name__ == "__main__":
