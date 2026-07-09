@@ -107,7 +107,11 @@ def get_watchlist() -> set:
 
 
 # ----------------------------- статистика для страницы -----------------------------
-def compute_stats(book: dict, marks: dict) -> dict:
+def compute_stats(book: dict, marks: dict, members: set | None = None) -> dict:
+    """members задан для core-группы: в таблице показываем ТОЛЬКО текущий состав (ярлык
+    core-реал) и считаем по кошельку ТОЛЬКО с момента вступления (book['joined']). Убрал —
+    исчезает сразу; добавил — появляется сразу с нулём; старые позиции ушедших и прежние
+    стинты статистику не путают. Верхние деньги книги (equity/pnl) — по всей книге."""
     from collections import defaultdict
 
     def mark_val(p):
@@ -122,11 +126,29 @@ def compute_stats(book: dict, marks: dict) -> dict:
     pnl = equity - book["bankroll"]
     roi = pnl / book["bankroll"] if book["bankroll"] else 0.0
 
+    # членство core: точка отсчёта = момент вступления (чистая статистика «с добавления»)
+    joined = None
+    if members is not None:
+        now_ts = int(time.time())
+        joined = book.setdefault("joined", {})
+        for m in members:
+            joined.setdefault(m, now_ts)             # новый член -> отсчёт с этого момента
+        for w in [w for w in joined if w not in members]:
+            del joined[w]                            # вышел -> забыли (свежий отсчёт при возврате)
+
+    def _skip(w, ts):                                # пропускаем чужих и всё ДО вступления
+        if members is None:
+            return False
+        wl_ = (w or "").lower()
+        return wl_ not in members or (ts or 0) < joined.get(wl_, 0)
+
     stat = defaultdict(lambda: {"copied": 0, "closed": 0, "wins": 0, "realized": 0.0,
                                 "open_val": 0.0, "open_cost": 0.0, "spent": 0.0, "open_n": 0,
                                 "delay": 0.0})
     for r in book["log"]:
         w = r.get("w", "?")
+        if _skip(w, r.get("t", 0)):
+            continue
         if r.get("act") == "BUY":
             stat[w]["copied"] += 1
             stat[w]["spent"] += r.get("spend", 0) or 0   # суммарно задействовано $ на эту цель
@@ -139,6 +161,8 @@ def compute_stats(book: dict, marks: dict) -> dict:
             stat[w]["wins"] += 1 if r["pnl"] > 0 else 0
     for p in book["positions"].values():
         w = p.get("wallet", "?")
+        if _skip(w, p.get("opened", 0)):
+            continue
         stat[w]["open_val"] += mark_val(p)
         stat[w]["open_cost"] += p["cost"]
         stat[w]["open_n"] += 1                        # число открытых позиций (усреднения уже слиты)
@@ -173,6 +197,15 @@ def compute_stats(book: dict, marks: dict) -> dict:
             "flag": flag,
             "source": sources.get(w, "—"),
         })
+    if members is not None:                          # core: только текущий состав + новые с нулём
+        per_wallet = [w for w in per_wallet if w["wallet"].lower() in members]
+        seen_m = {w["wallet"].lower() for w in per_wallet}
+        for m in members:
+            if m not in seen_m:                      # добавлен, но ещё не торговал -> нулевая строка
+                per_wallet.append({"wallet": m, "copied": 0, "closed": 0, "win_rate": 0.0,
+                                   "open_n": 0, "realized": 0.0, "unrealized": 0.0, "total": 0.0,
+                                   "open_val": 0.0, "spent": 0.0, "delay": 0.0, "flag": "",
+                                   "source": sources.get(m, "core-реал")})
     # ---- PnL «за сегодня»: ЕДИНЫЙ дневной снимок ПО КОШЕЛЬКАМ (сброс в полночь сервера) ----
     # Храним ТОЛЬКО пер-кошельковый срез на начало суток. Карточку считаем как сумму «сегодня»
     # по видимым кошелькам — тогда верх и таблица всегда сходятся, и удаление кошелька всегда
@@ -979,7 +1012,8 @@ def api_state():
         status = dict(STATE[stt])
     if book is None:
         return jsonify({"error": "group not running"}), 503
-    data = compute_stats(book, marks)
+    members = set(_core_wallets()) if bk == "core_book" else None   # вкладка = текущий состав
+    data = compute_stats(book, marks, members=members)
     data["status"] = status
     data["group"] = "core" if bk == "core_book" else "main"
     data["n_liq_skip"] = book.get("n_liq_skip", 0)
