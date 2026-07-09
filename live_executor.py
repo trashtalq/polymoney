@@ -51,7 +51,7 @@ def load_env():
     cfg.update({k: v for k, v in os.environ.items() if k in (
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
-        "MAX_ENTRIES_PER_POS")})
+        "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY")})
     return cfg
 
 
@@ -109,10 +109,11 @@ def resp_ok(resp):
 
 
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-             max_entries, funder):
+             max_entries, funder, max_per_wallet):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     state = st_load()
+    state.setdefault("spent_by_wallet", {})           # адрес цели -> $ потрачено за день (лимит на кошелёк)
     session_add = {}          # tok -> $ добавлено ЭТИМ процессом (страхует settle-лаг чейна)
     held = {}                 # tok -> $ реально вложено с кошелька (обновляется каждый цикл)
     smoke_done = False
@@ -154,9 +155,10 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             #                                          счётчик сеанса покрывает только этот цикл
 
         today = time.strftime("%Y-%m-%d")
-        if state.get("day") != today:                # новый день -> сброс дневного счётчика
+        if state.get("day") != today:                # новый день -> сброс дневных счётчиков
             state["day"] = today
             state["spent_day"] = 0.0
+            state["spent_by_wallet"] = {}
 
         for sig in r.get("signals", []):
             k = sig_key(sig)
@@ -183,6 +185,12 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                       flush=True)
                 state["done"].append(k)
                 continue
+            wsp = state["spent_by_wallet"].get(sig.get("w", ""), 0.0)   # лимит трат на ОДИН кошелёк/день
+            if max_per_wallet and wsp + per_trade > max_per_wallet + 1e-6:
+                print(f"  skip (кошелёк {sig.get('w','')[:8]}… уже ${wsp:.0f}/день, лимит "
+                      f"${max_per_wallet:.0f} — не даём частильщику съесть бюджет): {title}", flush=True)
+                state["done"].append(k)
+                continue
             if state["spent_total"] + per_trade > deposit:
                 print(f"  СТОП: депозит ${deposit} исчерпан (потрачено ${state['spent_total']:.2f})",
                       flush=True)
@@ -199,7 +207,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
 
             if mode == "dry":
                 print(f"  [DRY] купил бы: {line}", flush=True)
-                session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade  # dry-превью лимита
+                session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade  # dry-превью лимитов
+                state["spent_by_wallet"][sig.get("w", "")] = wsp + per_trade
                 state["done"].append(k)
                 continue
 
@@ -224,6 +233,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 if ok:
                     state["done"].append(k)
                     session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade
+                    state["spent_by_wallet"][sig.get("w", "")] = wsp + per_trade
                     state["spent_total"] = round(state["spent_total"] + per_trade, 2)
                     state["spent_day"] = round(state["spent_day"] + per_trade, 2)
                     smoke_done = True
@@ -253,15 +263,16 @@ def main():
     poll = int(cfg.get("POLL_SEC") or 30)
     max_age = int(cfg.get("MAX_AGE_SEC") or 300)     # старше — не копируем (цена уехала)
     max_entries = int(cfg.get("MAX_ENTRIES_PER_POS") or 2)   # не больше N входов в одну позу
+    max_per_wallet = float(cfg.get("MAX_PER_WALLET_DAY") or 5)  # не больше $X/день на один кошелёк
 
     print(f"=== live_executor | MODE={mode.upper()} | депозит ${deposit} | ставка ${per_trade} | "
-          f"дневной лимит ${daily_max} | свежесть <={max_age//60}мин | до {max_entries}x в позу ===",
-          flush=True)
+          f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | свежесть <={max_age//60}мин | "
+          f"до {max_entries}x в позу ===", flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
 
     if mode == "dry":
         run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-                 max_entries, (cfg.get("FUNDER") or "").strip())
+                 max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -287,7 +298,7 @@ def main():
     print(f"кошелёк-депозит: {funder}", flush=True)
     with client:                                     # SDK-клиент как контекст (сессия/очистка)
         run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-                 max_entries, funder)
+                 max_entries, funder, max_per_wallet)
 
 
 if __name__ == "__main__":
