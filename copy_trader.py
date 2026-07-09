@@ -774,7 +774,8 @@ def copy_sell(book: dict, e: dict, slippage: float, cur=None, wallet: str = "") 
     book["realized"] += proceeds - cost_part
     rec = {"t": ev_ts(e), "w": pos["wallet"], "act": "SELL", "px": round(px, 4),
            "pnl": round(proceeds - cost_part, 2), "out": pos.get("outcome", ""),
-           "title": ev_title(e)[:46]}
+           "title": ev_title(e)[:46],
+           "tok": ev_token(e), "cid": ev_cid(e), "frac": round(frac, 3)}  # для мирроринга выходов
     _real_exit(book, pos, proceeds, cost_part, rec)  # реал-леджер: до изменения pos
     book["log"].append(rec)
     pos["qty"] -= qty_sold

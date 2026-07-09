@@ -51,7 +51,7 @@ def load_env():
     cfg.update({k: v for k, v in os.environ.items() if k in (
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
-        "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS")})
+        "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS", "EXIT_MIN_FRAC")})
     return cfg
 
 
@@ -93,9 +93,9 @@ def resolve_days(s, cid, now):
 
 
 def fetch_held(s, funder):
-    """Реальные вложения по токенам с кошелька (data-api): {asset: $ вложено}. Основа лимита
-    входов в позу — берётся с ЧЕЙНА, поэтому переживает рестарт и видит входы, сделанные до
-    фикса/другим кодом. None при ошибке (тогда используем прошлый снимок)."""
+    """Реальные позиции по токенам с кошелька (data-api): {asset: {"usd": вложено, "shares": долей}}.
+    $ — основа лимита входов в позу; shares — сколько ПРОДАТЬ при мирроринге выхода. Берётся с
+    ЧЕЙНА -> переживает рестарт и видит входы др. кодом. None при ошибке (используем прошлый снимок)."""
     try:
         pos = s.get(f"https://data-api.polymarket.com/positions?user={funder}&limit=300",
                     timeout=20).json()
@@ -111,7 +111,9 @@ def fetch_held(s, funder):
         cost = p.get("initialValue")
         if cost is None:
             cost = (p.get("size") or 0) * (p.get("avgPrice") or 0)
-        out[a] = out.get(a, 0.0) + float(cost or 0)
+        d = out.setdefault(a, {"usd": 0.0, "shares": 0.0})
+        d["usd"] += float(cost or 0)
+        d["shares"] += float(p.get("size") or 0)
     return out
 
 
@@ -132,7 +134,7 @@ def resp_ok(resp):
 
 
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-             max_entries, funder, max_per_wallet, max_resolve_days):
+             max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     state = st_load()
@@ -209,7 +211,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                     state["done"].append(k)
                     continue
             # лимит на позу по РЕАЛЬНОМУ вложению (чейн + входы этого цикла) — не больше cap_usd
-            deployed = held.get(sig["tok"], 0.0) + session_add.get(sig["tok"], 0.0)
+            deployed = held.get(sig["tok"], {}).get("usd", 0.0) + session_add.get(sig["tok"], 0.0)
             if deployed + per_trade > cap_usd + 1e-6:
                 print(f"  skip (в этой позе уже ~${deployed:.2f}, лимит ${cap_usd:.2f}): {title}",
                       flush=True)
@@ -275,6 +277,42 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             except Exception as ex:  # noqa: BLE001
                 print(f"  !! ордер не прошёл ({ex}) — сигнал НЕ помечен, повторим позже", flush=True)
 
+        # --- ВЫХОДЫ: цель ПРОДАЛА (до резолва) -> продаём свою позицию ЦЕЛИКОМ. Мелкие скейл-ауты
+        # (доля < exit_min_frac) игнорим; smoke выходы не трогает (он про проверку входа). ---
+        for ex in r.get("exits", []):
+            state["last_t"] = max(state["last_t"], ex.get("t", 0))
+            xk = "X|" + str(ex.get("t", 0)) + "|" + ex.get("tok", "")
+            if xk in state["done"]:
+                continue
+            tok = ex.get("tok", "")
+            xtitle = (ex.get("title") or "")[:48]
+            if (ex.get("frac") or 1.0) < exit_min_frac:       # цель вышла лишь частично -> ждём
+                state["done"].append(xk)
+                continue
+            shares = math.floor(held.get(tok, {}).get("shares", 0.0) * 100) / 100   # вниз, не оверселл
+            if shares <= 0:                                   # мы это не держим -> нечего продавать
+                state["done"].append(xk)
+                continue
+            if mode == "smoke":
+                continue
+            if mode == "dry":
+                print(f"  [DRY] продал бы всю позу (~{shares} долей): {xtitle}", flush=True)
+                state["done"].append(xk)
+                continue
+            try:
+                resp = client.place_market_order(token_id=tok, side="SELL",
+                                                 shares=float(shares), order_type="FAK")
+                if resp_ok(resp):
+                    print(f"  [LIVE] ВЫХОД вслед за целью: продал ~{shares} долей -> {xtitle}",
+                          flush=True)
+                    held[tok] = {"usd": 0.0, "shares": 0.0}   # локально помечаем закрытым до след. fetch
+                    state["done"].append(xk)
+                    st_save(state)
+                else:
+                    print(f"  !! выход не прошёл: {resp!r} — повторим позже", flush=True)
+            except Exception as ex2:  # noqa: BLE001
+                print(f"  !! выход не прошёл ({ex2}) — повторим позже", flush=True)
+
         if len(state["done"]) > 4000:                # держим список исполненного компактным
             state["done"] = state["done"][-2000:]
         st_save(state)
@@ -295,15 +333,17 @@ def main():
     max_entries = int(cfg.get("MAX_ENTRIES_PER_POS") or 2)   # не больше N входов в одну позу
     max_per_wallet = float(cfg.get("MAX_PER_WALLET_DAY") or 5)  # не больше $X/день на один кошелёк
     max_resolve_days = float(cfg.get("MAX_RESOLVE_DAYS") or 7)  # не входить в рынки с резолвом дальше N дней
+    exit_min_frac = float(cfg.get("EXIT_MIN_FRAC") or 0.5)      # выходим, если цель продала >= этой доли
 
     print(f"=== live_executor | MODE={mode.upper()} | депозит ${deposit} | ставка ${per_trade} | "
           f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | резолв <={max_resolve_days:g}д | "
-          f"до {max_entries}x в позу ===", flush=True)
+          f"до {max_entries}x в позу | ВЫХОДЫ вслед за целью (>={exit_min_frac:g}) ===", flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
 
     if mode == "dry":
         run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-                 max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet, max_resolve_days)
+                 max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet, max_resolve_days,
+                 exit_min_frac)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -329,7 +369,7 @@ def main():
     print(f"кошелёк-депозит: {funder}", flush=True)
     with client:                                     # SDK-клиент как контекст (сессия/очистка)
         run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-                 max_entries, funder, max_per_wallet, max_resolve_days)
+                 max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac)
 
 
 if __name__ == "__main__":

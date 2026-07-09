@@ -1336,14 +1336,22 @@ def api_signals():
         book = STATE[bk] or {"log": []}
         status = dict(STATE[stt])
         paused = bool(book.get("paused", False))
-        sigs = [r for r in book.get("log", [])[-500:]
+        tail = book.get("log", [])[-800:]
+        sigs = [r for r in tail
                 if r.get("act") == "BUY" and r.get("t", 0) > since and r.get("tok")]
+        # ВЫХОДЫ: цель продала (не резолв) -> мирроим выход. frac = какую долю холдинга продала.
+        exits = [r for r in tail
+                 if r.get("act") == "SELL" and r.get("t", 0) > since and r.get("tok")]
     return jsonify({"now": int(time.time()), "paused": paused,
                     "last_poll": status.get("last_poll", 0),
                     "signals": [{"t": r["t"], "w": r.get("w", ""), "tok": r["tok"],
                                  "cid": r.get("cid", ""), "px": r.get("px"),
                                  "spend": r.get("spend"), "out": r.get("out", ""),
-                                 "title": r.get("title", "")} for r in sigs[-100:]]})
+                                 "title": r.get("title", "")} for r in sigs[-100:]],
+                    "exits": [{"t": r["t"], "w": r.get("w", ""), "tok": r["tok"],
+                               "cid": r.get("cid", ""), "frac": r.get("frac", 1.0),
+                               "out": r.get("out", ""), "title": r.get("title", "")}
+                              for r in exits[-100:]]})
 
 
 @app.route("/api/shadow_audit")
