@@ -1385,6 +1385,26 @@ def _real_addr():
         return os.environ.get("REAL_ACCOUNT", "")
 
 
+@app.route("/api/reset", methods=["POST"])
+def api_reset():
+    """ПОЛНЫЙ СБРОС бумажной статистики группы (пароль в теле): {pw, g: ""|"core"}.
+    Форвард с нуля. Реальный on-chain счёт (панель /api/real) НЕ трогается — он вне книги."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    bk, _m, _s, ver, sf = _slot(data.get("g", ""))
+    with _lock:
+        if STATE.get(bk) is None:
+            return jsonify({"ok": False, "error": "group not running"}), 503
+        res = ct.reset_book(STATE[bk])
+        STATE[ver] += 1                              # инвалидирует снимок в полёте у poll_loop
+        try:
+            ct.save_book(STATE.get(sf, "paper_book.json"), STATE[bk])
+        except Exception:  # noqa: BLE001
+            pass
+    return jsonify({"ok": True, "group": ("core" if bk == "core_book" else "main"), **res})
+
+
 @app.route("/api/set_real_account", methods=["POST"])
 def api_set_real_account():
     """Задать ПУБЛИЧНЫЙ адрес реального счёта бота (пароль в теле). Только адрес, не ключ —

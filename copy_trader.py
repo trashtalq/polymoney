@@ -254,6 +254,24 @@ def rescale_book(book: dict, factor: float) -> dict:
             "bankroll_after": round(book.get("bankroll", 0.0) or 0.0, 2)}
 
 
+def reset_book(book: dict) -> dict:
+    """ПОЛНЫЙ СБРОС статистики: форвард с нуля (позиции/лог/PnL/реал-леджер/теневые — всё чисто),
+    seen пуст -> следующий цикл фиксирует старт заново (историю НЕ докупает). Сохраняем: базовый
+    капитал (bankroll-topups), флаг hard_cash (жёсткий депозит core), typical (обученный сайзинг
+    целей — не статистика). Реальный on-chain счёт этим не трогается (он вне книги)."""
+    base = round((book.get("bankroll", 0.0) or 0.0) - (book.get("topups", 0.0) or 0.0), 2)
+    hard = bool(book.get("hard_cash"))
+    keep_typical = book.get("typical", {})
+    book.clear()
+    book.update({"bankroll": base, "cash": base, "started": int(time.time()),
+                 "positions": {}, "seen": {}, "realized": 0.0, "n_copied": 0, "n_skipped": 0,
+                 "typical": keep_typical, "skipped": [], "skipped_realized": 0.0, "topups": 0.0,
+                 "thold": {}, "log": []})
+    if hard:
+        book["hard_cash"] = True
+    return {"base": base, "hard_cash": hard}
+
+
 def renorm_book(book: dict, target_base: float = 10000.0, thresh: float = 10.0) -> dict:
     """ВОССТАНОВЛЕНИЕ смешанного масштаба -> единый /10 (per_trade=10).
     Причина беды: docker-compose.yml с PER_TRADE не доезжал на сервер, поэтому после /100-пересчёта
