@@ -45,7 +45,8 @@ def load_env():
                 cfg[k.strip()] = v.strip().strip('"').strip("'")
     cfg.update({k: v for k, v in os.environ.items() if k in (
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
-        "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP")})
+        "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP",
+        "SIGNATURE_TYPE", "FUNDER")})
     return cfg
 
 
@@ -93,11 +94,21 @@ def main():
             print("!! нет py-clob-client. Установи: pip install py-clob-client", flush=True)
             return
         host = "https://clob.polymarket.com"
-        client = ClobClient(host, key=pk, chain_id=137)
+        funder = (cfg.get("FUNDER") or "").strip()
+        sig_type = int(cfg.get("SIGNATURE_TYPE") or 0)
+        if funder:
+            # аккаунт Polymarket через почту/Google/Magic или браузерный кошелёк: средства на
+            # ПРОКСИ-кошельке, ключ лишь подписант. signature_type=1 (email/magic) или 2 (браузер),
+            # funder = адрес прокси (твой адрес на polymarket.com).
+            client = ClobClient(host, key=pk, chain_id=137,
+                                signature_type=sig_type, funder=funder)
+            print(f"режим прокси: signature_type={sig_type}, funder={funder}", flush=True)
+        else:
+            client = ClobClient(host, key=pk, chain_id=137)   # обычный EOA-кошелёк (ключ = адрес)
         try:
             client.set_api_creds(client.create_or_derive_api_creds())
             addr = client.get_address()
-            print(f"кошелёк подключён: {addr}", flush=True)
+            print(f"подписант (ключ): {addr}", flush=True)
         except Exception as ex:  # noqa: BLE001
             print(f"!! не удалось инициализировать CLOB-клиент: {ex}", flush=True)
             return
