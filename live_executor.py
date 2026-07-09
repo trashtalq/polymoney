@@ -64,6 +64,26 @@ def sig_key(sig):
     return f"{sig['t']}|{sig['tok']}"
 
 
+_NEG = {}
+
+
+def is_neg_risk(s, cid):
+    """neg-risk рынки Polymarket (мультибрекеты) торгуются на ОТДЕЛЬНОМ контракте-бирже —
+    ордер надо строить с флагом neg_risk, иначе CLOB отбивает 'invalid order version'.
+    Определяем по метаданным рынка, кэшируем по conditionId."""
+    if not cid:
+        return False
+    if cid in _NEG:
+        return _NEG[cid]
+    try:
+        m = s.get(f"https://clob.polymarket.com/markets/{cid}", timeout=15).json()
+        nr = bool(m.get("neg_risk"))
+    except Exception:  # noqa: BLE001
+        nr = False
+    _NEG[cid] = nr
+    return nr
+
+
 def main():
     cfg = load_env()
     mode = (cfg.get("MODE") or "dry").lower()
@@ -88,7 +108,7 @@ def main():
             return
         try:
             from py_clob_client.client import ClobClient          # noqa: F401
-            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
             from py_clob_client.order_builder.constants import BUY
         except ImportError:
             print("!! нет py-clob-client. Установи: pip install py-clob-client", flush=True)
@@ -112,7 +132,8 @@ def main():
         except Exception as ex:  # noqa: BLE001
             print(f"!! не удалось инициализировать CLOB-клиент: {ex}", flush=True)
             return
-        globals().update(OrderArgs=OrderArgs, OrderType=OrderType, BUY=BUY)
+        globals().update(OrderArgs=OrderArgs, OrderType=OrderType, BUY=BUY,
+                         PartialCreateOrderOptions=PartialCreateOrderOptions)
 
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
@@ -190,9 +211,10 @@ def main():
                 return
 
             try:                                          # РЕАЛЬНЫЙ ОРДЕР (FOK — заполнить сразу или отменить)
+                neg = is_neg_risk(s, sig.get("cid", ""))   # neg-risk рынок -> отдельная сборка ордера
                 args = OrderArgs(price=min(max_price, round(px + 0.01, 3)),  # +1 цент запас на филл
                                  size=size, side=BUY, token_id=sig["tok"])
-                signed = client.create_order(args)
+                signed = client.create_order(args, PartialCreateOrderOptions(neg_risk=neg))
                 resp = client.post_order(signed, OrderType.FOK)
                 ok = bool(resp and (resp.get("success") or resp.get("orderID") or resp.get("status")))
                 print(f"  [{'SMOKE' if mode=='smoke' else 'LIVE'}] ордер: {line} -> {resp}", flush=True)
