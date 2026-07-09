@@ -24,6 +24,7 @@ import threading
 import time
 from pathlib import Path
 
+import requests
 from flask import Flask, jsonify, request, Response
 
 import copy_trader as ct
@@ -566,6 +567,19 @@ PAGE = r"""<!doctype html>
 
   <div class="cards" id="cards"></div>
 
+  <div id="realwrap" style="display:none">
+    <div class="sec">💰 Реальный счёт бота <span id="realaddr" class="muted" style="font-size:11px"></span></div>
+    <div class="cards" id="realcards"></div>
+    <div class="sec" style="font-size:11px">Реальные сделки — входы и выходы бота</div>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Время</th><th>Действие</th><th>Ставка</th><th>Рынок</th><th>Цена</th><th>$</th></tr></thead>
+      <tbody id="realtrades"></tbody></table></div>
+    <div class="sec" style="font-size:11px">Реальные открытые позиции</div>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Рынок</th><th>Ставка</th><th>Вход</th><th>Тек.</th><th>Стоим.</th><th>P/L</th></tr></thead>
+      <tbody id="realpos"></tbody></table></div>
+  </div>
+
   <div class="sec">Кривая PnL</div>
   <div class="spark"><svg id="spark" width="100%" height="132" preserveAspectRatio="none"></svg></div>
 
@@ -662,6 +676,39 @@ function paintTabs(){
     : "Итого PnL — форвард";
 }
 function setGrp(g){ G=g; localStorage.setItem("grp",g); paintTabs(); closeWallet(); closeSkipped(); tick(); }
+async function loadReal(){
+  let d; try{ d=await (await fetch("/api/real")).json(); }catch(e){ return; }
+  if(!d.configured){ $("realaddr").textContent="(адрес не задан)"; return; }
+  if(d.error){ $("realaddr").textContent="data-api недоступен"; return; }
+  $("realaddr").innerHTML='<a class="addr" href="https://polymarket.com/profile/'+d.address+'" target="_blank">'+shortAddr(d.address)+' ↗</a>';
+  const tot=(d.realized||0)+(d.unrealized||0);
+  $("realcards").innerHTML=[
+    ["Стоимость счёта", money(d.value), "", "feat"],
+    ["Итого PnL", (tot>=0?'+':'')+money(tot), cls(tot), "feat"],
+    ["Реализовано (закрыто)", money(d.realized), cls(d.realized)],
+    ["Нереализ. (открыто)", money(d.unrealized), cls(d.unrealized)],
+    ["Открытых позиций", d.n_open, ""],
+    ["Сделок всего", d.n_trades, ""],
+  ].map(c=>'<div class="card'+(c[3]?' '+c[3]:'')+'"><div class="k">'+c[0]+'</div><div class="v num '+c[2]+'">'+c[1]+'</div></div>').join("");
+  const sideTag=s=>{ s=(s||"").toUpperCase();
+    if(s==="BUY")return '<span class="tag BUY">ВХОД</span>';
+    if(s==="SELL")return '<span class="tag SELL">ВЫХОД</span>';
+    return '<span class="tag REDEEM">'+(s==="REDEEM"?"РЕДИМ":s)+'</span>'; };
+  $("realtrades").innerHTML=(d.trades||[]).map(t=>
+    '<tr><td class="mono muted">'+tm(t.t)+'</td><td>'+sideTag(t.side)+'</td>'+
+    '<td>'+sideBadge(t.outcome)+'</td><td class="title">'+(t.title||"")+'</td>'+
+    '<td class="num muted">'+(t.price!=null?t.price.toFixed(3):"—")+'</td>'+
+    '<td class="num">'+money(t.usd)+'</td></tr>').join("")
+    || '<tr><td colspan="6" class="empty">сделок пока нет</td></tr>';
+  $("realpos").innerHTML=(d.positions||[]).map(p=>
+    '<tr><td class="title">'+(p.title||"")+(p.redeemable?' <span class="tag REDEEM">к редиму</span>':'')+'</td>'+
+    '<td>'+sideBadge(p.outcome)+'</td>'+
+    '<td class="num muted">'+(p.entry!=null?p.entry.toFixed(3):"—")+'</td>'+
+    '<td class="num">'+(p.mark!=null?p.mark.toFixed(3):"—")+'</td>'+
+    '<td class="num muted">'+money(p.val)+'</td>'+
+    '<td class="num '+cls(p.pnl)+'">'+money(p.pnl)+'</td></tr>').join("")
+    || '<tr><td colspan="6" class="empty">открытых позиций нет</td></tr>';
+}
 const money = v => (v<0?"-":"")+"$"+Math.abs(v).toLocaleString("en-US",{maximumFractionDigits:0});
 const cls = v => v>0.005?"pos":(v<-0.005?"neg":"zero");
 const ago = ts => { if(!ts) return "—"; const s=Math.floor(Date.now()/1000-ts);
@@ -895,6 +942,9 @@ async function tick(){
                    (d.n_liq_skip>0?"neg":""), "", "feat"]);
   }
   $("cards").innerHTML = cardsArr.map(c=>'<div class="card'+(c[4]?' '+c[4]:'')+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v num '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+(c[5]?'<div class="hint" style="color:var(--muted)">'+c[5]+'</div>':'')+'</div>').join("");
+
+  if(d.group==="core"){ $("realwrap").style.display=""; loadReal(); }
+  else $("realwrap").style.display="none";
 
   sparkline(d.pnl_history);
 
@@ -1323,6 +1373,103 @@ def api_set_source():
             n += 1
     sp.write_text(json.dumps(srcs, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify({"ok": True, "updated": n})
+
+
+_REAL = {"t": 0.0, "data": None}          # кэш реального счёта (data-api rate-limited)
+
+
+def _real_addr():
+    try:
+        return json.loads(Path("real_account.json").read_text(encoding="utf-8")).get("address", "")
+    except Exception:  # noqa: BLE001
+        return os.environ.get("REAL_ACCOUNT", "")
+
+
+@app.route("/api/set_real_account", methods=["POST"])
+def api_set_real_account():
+    """Задать ПУБЛИЧНЫЙ адрес реального счёта бота (пароль в теле). Только адрес, не ключ —
+    дашборд тянет по нему сделки/PnL из data-api. Хранится локально (gitignored)."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    addr = (data.get("address", "") or "").lower().strip()
+    if not (addr.startswith("0x") and len(addr) == 42):
+        return jsonify({"ok": False, "error": "bad address"}), 400
+    Path("real_account.json").write_text(json.dumps({"address": addr}), encoding="utf-8")
+    _REAL["t"] = 0.0
+    return jsonify({"ok": True, "address": addr})
+
+
+@app.route("/api/real")
+def api_real():
+    """Реальный счёт бота из Polymarket data-api (по публичному адресу): стоимость, реализ./
+    нереализ. PnL, открытые позиции, последние сделки (входы И выходы). Кэш 60с."""
+    addr = _real_addr()
+    if not addr:
+        return jsonify({"configured": False})
+    if time.time() - _REAL["t"] < 60 and _REAL["data"]:
+        return jsonify(_REAL["data"])
+    D = "https://data-api.polymarket.com"
+    hdr = {"User-Agent": "Mozilla/5.0"}
+
+    def g(path):
+        return requests.get(D + path, headers=hdr, timeout=15).json()
+    try:
+        val = (g(f"/value?user={addr}") or [{}])[0].get("value", 0)
+        positions, off = [], 0
+        while off < 500:
+            p = g(f"/positions?user={addr}&limit=100&offset={off}")
+            if not isinstance(p, list) or not p:
+                break
+            positions += p
+            off += 100
+            if len(p) < 100:
+                break
+        act, off = [], 0
+        while off < 400:
+            a = g(f"/activity?user={addr}&limit=100&offset={off}")
+            if not isinstance(a, list) or not a:
+                break
+            act += a
+            off += 100
+            if len(a) < 100:
+                break
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"configured": True, "address": addr, "error": str(e)})
+
+    from collections import defaultdict
+    open_cids = {p.get("conditionId") for p in positions}
+    unreal = sum(float(p.get("cashPnl") or 0) for p in positions)
+    real_open = sum(float(p.get("realizedPnl") or 0) for p in positions)
+    grp = defaultdict(lambda: {"buy": 0.0, "out": 0.0})
+    for a in act:
+        u = float(a.get("usdcSize") or 0)
+        if (a.get("type", "").upper() == "TRADE" and a.get("side", "").upper() == "BUY"):
+            grp[a.get("conditionId")]["buy"] += u
+        else:
+            grp[a.get("conditionId")]["out"] += u   # SELL/REDEEM = деньги обратно
+    real_closed = sum(v["out"] - v["buy"] for c, v in grp.items() if c not in open_cids)
+    poslist = sorted(positions, key=lambda p: -abs(float(p.get("currentValue") or 0)))
+    out = {
+        "configured": True, "address": addr, "value": round(val, 2),
+        "unrealized": round(unreal, 2), "realized": round(real_closed + real_open, 2),
+        "n_open": len(positions), "n_trades": len(act),
+        "positions": [{"title": p.get("title", ""), "outcome": p.get("outcome", ""),
+                       "entry": round(float(p.get("avgPrice") or 0), 3),
+                       "mark": round(float(p.get("curPrice") or 0), 3),
+                       "val": round(float(p.get("currentValue") or 0), 2),
+                       "pnl": round(float(p.get("cashPnl") or 0), 2),
+                       "redeemable": bool(p.get("redeemable"))} for p in poslist[:60]],
+        "trades": [{"t": a.get("timestamp", 0),
+                    "side": (a.get("side") or a.get("type") or "").upper(),
+                    "title": a.get("title", ""), "outcome": a.get("outcome", ""),
+                    "price": round(float(a.get("price") or 0), 3),
+                    "usd": round(float(a.get("usdcSize") or 0), 2)}
+                   for a in sorted(act, key=lambda x: -x.get("timestamp", 0))[:40]],
+    }
+    _REAL["t"] = time.time()
+    _REAL["data"] = out
+    return jsonify(out)
 
 
 @app.route("/api/signals")
