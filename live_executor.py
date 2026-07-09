@@ -49,7 +49,7 @@ def load_env():
                 cfg[k.strip()] = v.strip().strip('"').strip("'")
     cfg.update({k: v for k, v in os.environ.items() if k in (
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
-        "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER")})
+        "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC")})
     return cfg
 
 
@@ -83,11 +83,12 @@ def resp_ok(resp):
     return True                                      # исключения не было -> считаем принятым
 
 
-def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll):
+def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     state = st_load()
     smoke_done = False
+    primed = False                                    # форвард на КАЖДОМ запуске, не только первом
 
     while True:
         try:
@@ -102,10 +103,13 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             time.sleep(poll)
             continue
 
-        # ФОРВАРД С МОМЕНТА ЗАПУСКА: на самом первом опросе НЕ отыгрываем бэклог (иначе бот
-        # накупил бы десятки СТАРЫХ сигналов). Точка отсчёта = серверное «сейчас».
-        if state["last_t"] == 0:
-            state["last_t"] = int(r.get("now") or time.time())
+        srv_now = int(r.get("now") or time.time())
+        # ФОРВАРД С МОМЕНТА ЗАПУСКА (на ЛЮБОМ старте): первый опрос НЕ отыгрывает бэклог — точку
+        # отсчёта прыгаем на серверное «сейчас». Иначе после паузы/рестарта бот скупил бы всё,
+        # что случилось, пока он был выключен, по уже уехавшим ценам.
+        if not primed:
+            primed = True
+            state["last_t"] = max(state["last_t"], srv_now)
             st_save(state)
             print(f"[{time.strftime('%H:%M:%S')}] старт: форвард с этой точки, "
                   f"бэклог ({len(r.get('signals', []))} сигналов) пропущен. Жду новые сделки ядра…",
@@ -126,6 +130,12 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             px = sig.get("px") or 0
             title = (sig.get("title") or "")[:48]
             # --- гварды ---
+            age = srv_now - sig.get("t", srv_now)
+            if age > max_age:                         # СТАРЫЙ сигнал (цена уже уехала) — не копируем
+                print(f"  skip (старый {round(age/60,1)} мин > {round(max_age/60,1)} мин): {title}",
+                      flush=True)
+                state["done"].append(k)
+                continue
             if px <= 0 or px > max_price:
                 print(f"  skip (цена {px} вне 0..{max_price}): {title}", flush=True)
                 state["done"].append(k)
@@ -193,13 +203,15 @@ def main():
     daily_max = float(cfg.get("DAILY_MAX_USD") or 20)
     max_price = float(cfg.get("MAX_PRICE") or 0.92)
     poll = int(cfg.get("POLL_SEC") or 30)
+    max_age = int(cfg.get("MAX_AGE_SEC") or 300)     # старше — не копируем (цена уехала)
 
     print(f"=== live_executor | MODE={mode.upper()} | депозит ${deposit} | "
-          f"ставка ${per_trade} | дневной лимит ${daily_max} ===", flush=True)
+          f"ставка ${per_trade} | дневной лимит ${daily_max} | свежесть <={max_age//60}мин ===",
+          flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
 
     if mode == "dry":
-        run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll)
+        run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -224,7 +236,7 @@ def main():
         return
     print(f"кошелёк-депозит: {funder}", flush=True)
     with client:                                     # SDK-клиент как контекст (сессия/очистка)
-        run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll)
+        run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age)
 
 
 if __name__ == "__main__":
