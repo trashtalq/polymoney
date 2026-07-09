@@ -51,7 +51,7 @@ def load_env():
     cfg.update({k: v for k, v in os.environ.items() if k in (
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
-        "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY")})
+        "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS")})
     return cfg
 
 
@@ -67,6 +67,29 @@ def st_save(s):
 
 def sig_key(sig):
     return f"{sig['t']}|{sig['tok']}"
+
+
+_MKT_END = {}          # cid -> unix резолва (0 = неизвестно), кэш на процесс
+
+
+def resolve_days(s, cid, now):
+    """Сколько ДНЕЙ до резолва рынка (из CLOB end_date_iso). Бот держит позицию ДО резолва
+    (выходы не мирроим), поэтому это и есть наш срок заморозки капитала. None = неизвестно."""
+    if not cid:
+        return None
+    if cid not in _MKT_END:
+        end = 0
+        try:
+            m = s.get(f"https://clob.polymarket.com/markets/{cid}", timeout=15).json()
+            ed = (m or {}).get("end_date_iso") or ""
+            if ed:
+                from datetime import datetime
+                end = datetime.fromisoformat(ed.replace("Z", "+00:00")).timestamp()
+        except Exception:  # noqa: BLE001
+            end = 0
+        _MKT_END[cid] = end
+    end = _MKT_END[cid]
+    return None if not end else (end - now) / 86400
 
 
 def fetch_held(s, funder):
@@ -109,7 +132,7 @@ def resp_ok(resp):
 
 
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-             max_entries, funder, max_per_wallet):
+             max_entries, funder, max_per_wallet, max_resolve_days):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     state = st_load()
@@ -178,6 +201,13 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 print(f"  skip (цена {px} вне 0..{max_price}): {title}", flush=True)
                 state["done"].append(k)
                 continue
+            if max_resolve_days:                      # рынок резолвится слишком поздно -> капитал застрянет
+                rd = resolve_days(s, sig.get("cid", ""), srv_now)
+                if rd is not None and rd > max_resolve_days:
+                    print(f"  skip (резолв через {round(rd,1)}д > {max_resolve_days}д, "
+                          f"капитал застрянет): {title}", flush=True)
+                    state["done"].append(k)
+                    continue
             # лимит на позу по РЕАЛЬНОМУ вложению (чейн + входы этого цикла) — не больше cap_usd
             deployed = held.get(sig["tok"], 0.0) + session_add.get(sig["tok"], 0.0)
             if deployed + per_trade > cap_usd + 1e-6:
@@ -264,15 +294,16 @@ def main():
     max_age = int(cfg.get("MAX_AGE_SEC") or 300)     # старше — не копируем (цена уехала)
     max_entries = int(cfg.get("MAX_ENTRIES_PER_POS") or 2)   # не больше N входов в одну позу
     max_per_wallet = float(cfg.get("MAX_PER_WALLET_DAY") or 5)  # не больше $X/день на один кошелёк
+    max_resolve_days = float(cfg.get("MAX_RESOLVE_DAYS") or 7)  # не входить в рынки с резолвом дальше N дней
 
     print(f"=== live_executor | MODE={mode.upper()} | депозит ${deposit} | ставка ${per_trade} | "
-          f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | свежесть <={max_age//60}мин | "
+          f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | резолв <={max_resolve_days:g}д | "
           f"до {max_entries}x в позу ===", flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
 
     if mode == "dry":
         run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-                 max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet)
+                 max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet, max_resolve_days)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -298,7 +329,7 @@ def main():
     print(f"кошелёк-депозит: {funder}", flush=True)
     with client:                                     # SDK-клиент как контекст (сессия/очистка)
         run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-                 max_entries, funder, max_per_wallet)
+                 max_entries, funder, max_per_wallet, max_resolve_days)
 
 
 if __name__ == "__main__":
