@@ -557,8 +557,29 @@ PAGE = r"""<!doctype html>
   <div class="tabs">
     <button class="tab on" id="tabMain" onclick="setGrp('main')">Общая группа</button>
     <button class="tab" id="tabCore" onclick="setGrp('core')">Core-реал <span class="sub">· жёсткий депозит</span></button>
+    <button class="tab" id="tabReal" onclick="setGrp('real')">💰 Реал <span class="sub">· живой счёт</span></button>
   </div>
 
+  <div id="realwrap" style="display:none">
+    <div class="heroLabel">Реальный счёт бота <span id="realaddr" class="muted" style="font-size:11px"></span></div>
+    <div class="hero num" id="realhero">—</div>
+    <div class="chips" id="realchips"></div>
+    <div class="cards" id="realcards"></div>
+    <div class="sec">У кого копировали — по кошелькам ядра</div>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Кошелёк ядра</th><th>Источник</th><th>Скопировано сделок</th><th>Вложено $</th></tr></thead>
+      <tbody id="realsrc"></tbody></table></div>
+    <div class="sec">Реальные сделки — входы и выходы бота</div>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Время</th><th>Действие</th><th>Ставка</th><th>Рынок</th><th>У кого</th><th>Цена</th><th>$</th></tr></thead>
+      <tbody id="realtrades"></tbody></table></div>
+    <div class="sec">Реальные открытые позиции</div>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Рынок</th><th>Ставка</th><th>Вход</th><th>Тек.</th><th>Стоим.</th><th>P/L</th></tr></thead>
+      <tbody id="realpos"></tbody></table></div>
+  </div>
+
+  <div id="paper">
   <div class="heroLabel" id="heroLabel">Итого PnL — форвард</div>
   <div class="hero num" id="hero">—</div>
   <div class="chips" id="chips"></div>
@@ -566,19 +587,6 @@ PAGE = r"""<!doctype html>
   <div class="err" id="err"></div>
 
   <div class="cards" id="cards"></div>
-
-  <div id="realwrap" style="display:none">
-    <div class="sec">💰 Реальный счёт бота <span id="realaddr" class="muted" style="font-size:11px"></span></div>
-    <div class="cards" id="realcards"></div>
-    <div class="sec" style="font-size:11px">Реальные сделки — входы и выходы бота</div>
-    <div class="tblwrap"><table>
-      <thead><tr><th>Время</th><th>Действие</th><th>Ставка</th><th>Рынок</th><th>Цена</th><th>$</th></tr></thead>
-      <tbody id="realtrades"></tbody></table></div>
-    <div class="sec" style="font-size:11px">Реальные открытые позиции</div>
-    <div class="tblwrap"><table>
-      <thead><tr><th>Рынок</th><th>Ставка</th><th>Вход</th><th>Тек.</th><th>Стоим.</th><th>P/L</th></tr></thead>
-      <tbody id="realpos"></tbody></table></div>
-  </div>
 
   <div class="sec">Кривая PnL</div>
   <div class="spark"><svg id="spark" width="100%" height="132" preserveAspectRatio="none"></svg></div>
@@ -605,6 +613,7 @@ PAGE = r"""<!doctype html>
     <thead><tr><th>Время</th><th>Кошелёк</th><th>Действие</th><th>Ставка</th><th>Рынок</th><th>PnL / сумма</th></tr></thead>
     <tbody id="log"></tbody>
   </table>
+  </div>
   </div>
 </div>
 
@@ -670,7 +679,10 @@ const qsa = () => G==="core" ? "&g=core" : "";
 function paintTabs(){
   $("tabMain").className = "tab"+(G==="main"?" on":"");
   $("tabCore").className = "tab"+(G==="core"?" on":"");
+  $("tabReal").className = "tab"+(G==="real"?" on":"");
   document.body.classList.toggle("coreview", G==="core");
+  $("realwrap").style.display = (G==="real")?"":"none";   // реал — отдельная вкладка
+  $("paper").style.display = (G==="real")?"none":"";
   $("heroLabel").textContent = G==="core"
     ? "CORE-РЕАЛ — жёсткий депозит, без доливов (кончился кэш — ждём резолвов)"
     : "Итого PnL — форвард";
@@ -678,10 +690,17 @@ function paintTabs(){
 function setGrp(g){ G=g; localStorage.setItem("grp",g); paintTabs(); closeWallet(); closeSkipped(); tick(); }
 async function loadReal(){
   let d; try{ d=await (await fetch("/api/real")).json(); }catch(e){ return; }
-  if(!d.configured){ $("realaddr").textContent="(адрес не задан)"; return; }
+  if(!d.configured){ $("realaddr").textContent="(адрес не задан)"; $("realhero").textContent="—"; return; }
   if(d.error){ $("realaddr").textContent="data-api недоступен"; return; }
   $("realaddr").innerHTML='<a class="addr" href="https://polymarket.com/profile/'+d.address+'" target="_blank">'+shortAddr(d.address)+' ↗</a>';
   const tot=(d.realized||0)+(d.unrealized||0);
+  $("realhero").className="hero num "+cls(tot);
+  $("realhero").textContent=money(d.value);
+  $("realchips").innerHTML=
+    '<span class="chip">стоимость <b>'+money(d.value)+'</b></span>'+
+    '<span class="chip '+cls(tot)+'">итого PnL <b>'+(tot>=0?'+':'')+money(tot)+'</b></span>'+
+    '<span class="chip">открыто <b>'+(d.n_open||0)+'</b></span>'+
+    '<span class="chip">сделок <b>'+(d.n_trades||0)+'</b></span>';
   $("realcards").innerHTML=[
     ["Стоимость счёта", money(d.value), "", "feat"],
     ["Итого PnL", (tot>=0?'+':'')+money(tot), cls(tot), "feat"],
@@ -690,6 +709,10 @@ async function loadReal(){
     ["Открытых позиций", d.n_open, ""],
     ["Сделок всего", d.n_trades, ""],
   ].map(c=>'<div class="card'+(c[3]?' '+c[3]:'')+'"><div class="k">'+c[0]+'</div><div class="v num '+c[2]+'">'+c[1]+'</div></div>').join("");
+  $("realsrc").innerHTML=(d.by_source||[]).map(s=>
+    '<tr><td>'+addrLink(s.wallet)+'</td><td><span class="rtag">'+(s.src||"—")+'</span></td>'+
+    '<td class="num">'+s.n+'</td><td class="num">'+money(s.usd)+'</td></tr>').join("")
+    || '<tr><td colspan="4" class="empty">пока нет атрибуции (сделки до сброса статистики не привязаны)</td></tr>';
   const sideTag=s=>{ s=(s||"").toUpperCase();
     if(s==="BUY")return '<span class="tag BUY">ВХОД</span>';
     if(s==="SELL")return '<span class="tag SELL">ВЫХОД</span>';
@@ -697,9 +720,10 @@ async function loadReal(){
   $("realtrades").innerHTML=(d.trades||[]).map(t=>
     '<tr><td class="mono muted">'+tm(t.t)+'</td><td>'+sideTag(t.side)+'</td>'+
     '<td>'+sideBadge(t.outcome)+'</td><td class="title">'+(t.title||"")+'</td>'+
+    '<td>'+(t.src?addrLink(t.src):'<span class="muted">—</span>')+'</td>'+
     '<td class="num muted">'+(t.price!=null?t.price.toFixed(3):"—")+'</td>'+
     '<td class="num">'+money(t.usd)+'</td></tr>').join("")
-    || '<tr><td colspan="6" class="empty">сделок пока нет</td></tr>';
+    || '<tr><td colspan="7" class="empty">сделок пока нет</td></tr>';
   $("realpos").innerHTML=(d.positions||[]).map(p=>
     '<tr><td class="title">'+(p.title||"")+(p.redeemable?' <span class="tag REDEEM">к редиму</span>':'')+'</td>'+
     '<td>'+sideBadge(p.outcome)+'</td>'+
@@ -870,6 +894,7 @@ function sparkline(hist){
 }
 
 async function tick(){
+  if(G==="real"){ await loadReal(); return; }   // вкладка реала: свой источник, бумагу не трогаем
   let d;
   try{ d=await (await fetch("/api/state"+qs())).json(); }
   catch(e){ $("status").innerHTML="сервер недоступен"; return; }
@@ -943,8 +968,7 @@ async function tick(){
   }
   $("cards").innerHTML = cardsArr.map(c=>'<div class="card'+(c[4]?' '+c[4]:'')+(c[3]?' clickable" onclick="openSkipped()"':'"')+'><div class="k">'+c[0]+'</div><div class="v num '+c[2]+'">'+c[1]+'</div>'+(c[3]?'<div class="hint">открыть журнал ›</div>':'')+(c[5]?'<div class="hint" style="color:var(--muted)">'+c[5]+'</div>':'')+'</div>').join("");
 
-  if(d.group==="core"){ $("realwrap").style.display=""; loadReal(); }
-  else $("realwrap").style.display="none";
+  // реал теперь ОТДЕЛЬНАЯ вкладка (paintTabs управляет видимостью), из core убран
 
   sparkline(d.pnl_history);
 
@@ -1470,10 +1494,43 @@ def api_real():
             grp[a.get("conditionId")]["out"] += u   # SELL/REDEEM = деньги обратно
     real_closed = sum(v["out"] - v["buy"] for c, v in grp.items() if c not in open_cids)
     poslist = sorted(positions, key=lambda p: -abs(float(p.get("currentValue") or 0)))
+
+    # --- АТРИБУЦИЯ: у кого скопирована каждая реальная сделка. Матч по токену+времени с логом
+    # core-книги (реал копирует ядро; core-BUY того же токена не позже нашей сделки = источник). ---
+    with _lock:
+        corelog = list((STATE.get("core_book") or {}).get("log", []))
+    tokbuys = defaultdict(list)
+    for r in corelog:
+        if r.get("act") == "BUY" and r.get("tok"):
+            tokbuys[str(r["tok"])].append((r.get("t", 0), (r.get("w") or "")))
+    for kk in tokbuys:
+        tokbuys[kk].sort()
+
+    def attrib(asset, tr):
+        best = ""
+        for tt, ww in tokbuys.get(str(asset or ""), []):
+            if tt <= (tr or 0) + 180:                # core-BUY не позже нашей сделки (+3 мин лаг копира)
+                best = ww
+            else:
+                break
+        return best
+
+    srcs = get_sources()
+    by_src = defaultdict(lambda: {"n": 0, "usd": 0.0})
+    for a in act:
+        if a.get("type", "").upper() == "TRADE" and (a.get("side") or "").upper() == "BUY":
+            w = attrib(a.get("asset"), a.get("timestamp", 0))
+            if w:
+                by_src[w]["n"] += 1
+                by_src[w]["usd"] += float(a.get("usdcSize") or 0)
+    by_source = sorted(
+        [{"wallet": w, "n": v["n"], "usd": round(v["usd"], 2), "src": srcs.get(w, "—")}
+         for w, v in by_src.items()], key=lambda x: -x["usd"])
+
     out = {
         "configured": True, "address": addr, "value": round(val, 2),
         "unrealized": round(unreal, 2), "realized": round(real_closed + real_open, 2),
-        "n_open": len(positions), "n_trades": len(act),
+        "n_open": len(positions), "n_trades": len(act), "by_source": by_source,
         "positions": [{"title": p.get("title", ""), "outcome": p.get("outcome", ""),
                        "entry": round(float(p.get("avgPrice") or 0), 3),
                        "mark": round(float(p.get("curPrice") or 0), 3),
@@ -1484,7 +1541,9 @@ def api_real():
                     "side": (a.get("side") or a.get("type") or "").upper(),
                     "title": a.get("title", ""), "outcome": a.get("outcome", ""),
                     "price": round(float(a.get("price") or 0), 3),
-                    "usd": round(float(a.get("usdcSize") or 0), 2)}
+                    "usd": round(float(a.get("usdcSize") or 0), 2),
+                    "src": (attrib(a.get("asset"), a.get("timestamp", 0))
+                            if (a.get("side") or "").upper() == "BUY" else "")}
                    for a in sorted(act, key=lambda x: -x.get("timestamp", 0))[:40]],
     }
     _REAL["t"] = time.time()
