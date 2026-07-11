@@ -223,14 +223,16 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                       f"${max_per_wallet:.0f} — не даём частильщику съесть бюджет): {title}", flush=True)
                 state["done"].append(k)
                 continue
-            if state["spent_total"] + per_trade > deposit:
-                print(f"  СТОП: депозит ${deposit} исчерпан (потрачено ${state['spent_total']:.2f})",
-                      flush=True)
-                st_save(state)
-                if mode != "live":
-                    return
-                time.sleep(poll)
-                break
+            # ЛИМИТ ДЕПОЗИТА = деньги В ОТКРЫТЫХ ПОЗИЦИЯХ СЕЙЧАС, не пожизненный расход. Когда
+            # позиция закрывается/продаётся — бюджет освобождается сам (held падает). Считаем по
+            # реальным холдингам с чейна (funder) + входы этого цикла. Без funder — старый счётчик.
+            exposure = (sum(v.get("usd", 0.0) for v in held.values()) + sum(session_add.values())
+                        if funder else state["spent_total"])
+            if exposure + per_trade > deposit + 1e-6:
+                print(f"  skip (в открытых позах ~${exposure:.2f}+${per_trade:g} > депозит ${deposit:g} "
+                      f"— ждём, пока освободятся): {title}", flush=True)
+                state["done"].append(k)
+                continue
             if state["spent_day"] + per_trade > daily_max:
                 print(f"  дневной лимит ${daily_max} достигнут — пауза до завтра", flush=True)
                 break
@@ -338,7 +340,7 @@ def main():
     #   доли своего холдинга (0.1 = на первую значимую продажу; 0.01 = на ЛЮБУЮ; выше = только на крупный выход)
 
     rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
-    print(f"=== live_executor | MODE={mode.upper()} | депозит ${deposit} | ставка ${per_trade} | "
+    print(f"=== live_executor | MODE={mode.upper()} | лимит-в-позах ${deposit} | ставка ${per_trade} | "
           f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | резолв {rezolv} | "
           f"до {max_entries}x в позу | ВЫХОДЫ вслед за целью (>={exit_min_frac:g}) ===", flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
