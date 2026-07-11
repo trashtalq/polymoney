@@ -20,6 +20,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -531,6 +532,10 @@ PAGE = r"""<!doctype html>
        border-color:var(--border2);text-shadow:0 0 10px rgba(6,229,255,.4);
        box-shadow:0 -6px 18px rgba(6,229,255,.06)}
   .tab .sub{font-weight:500;letter-spacing:.4px;text-transform:none;color:var(--muted);font-size:11px}
+  .tab .xg{margin-left:8px;opacity:.5;font-weight:700}
+  .tab .xg:hover{opacity:1;color:#ff6b6b}
+  .tab.tadd{color:var(--muted);opacity:.75;padding:9px 14px}
+  .tab.tadd:hover{opacity:1;color:var(--accent)}
   body.coreview .del{display:none}   /* состав core-группы меняется ярлыком, не удалением */
   .heroLabel{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:2.5px;margin-bottom:6px}
   .hero{font-size:58px;font-weight:800;letter-spacing:-2px;line-height:1;margin:0}
@@ -655,11 +660,7 @@ PAGE = r"""<!doctype html>
     </div>
   </header>
 
-  <div class="tabs">
-    <button class="tab on" id="tabMain" onclick="setGrp('main')">Общая группа</button>
-    <button class="tab" id="tabCore" onclick="setGrp('core')">Core-реал <span class="sub">· жёсткий депозит</span></button>
-    <button class="tab" id="tabReal" onclick="setGrp('real')">💰 Реал <span class="sub">· живой счёт</span></button>
-  </div>
+  <div class="tabs" id="tabbar"></div>
 
   <div id="realwrap" style="display:none">
     <div class="heroLabel">Реальный счёт бота <span id="realaddr" class="muted" style="font-size:11px"></span></div>
@@ -801,22 +802,59 @@ function applySecs(){
     if(body) body.style.display = closed ? "none" : "";
   });
 }
-// --- группы: main (общая, с доливами) / core (когорта core-реал, жёсткий депозит) ---
+// --- группы: main/core встроенные + кастомные (свои книги/вкладки/банкролл) ---
 let G = localStorage.getItem("grp") || "main";
-const qs  = () => G==="core" ? "?g=core" : "";
-const qsa = () => G==="core" ? "&g=core" : "";
+let GROUPS = [{id:"main",name:"Общая группа",hard_cash:false,builtin:true},
+              {id:"core",name:"Core-реал",label:"core-реал",hard_cash:true,builtin:true}];
+const qs  = () => (G!=="main"&&G!=="real") ? "?g="+encodeURIComponent(G) : "";
+const qsa = () => (G!=="main"&&G!=="real") ? "&g="+encodeURIComponent(G) : "";
+function _grp(id){ return GROUPS.find(x=>x.id===id); }
+function _esc(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function renderTabs(){
+  let h = GROUPS.map(g=>{
+    const sub = g.hard_cash ? ' <span class="sub">· жёсткий депозит</span>' : '';
+    const x = g.builtin ? '' :
+      ' <span class="xg" onclick="deleteGroup(event,\''+g.id+'\')" title="удалить группу">✕</span>';
+    return '<button class="tab'+(G===g.id?' on':'')+'" onclick="setGrp(\''+g.id+'\')">'+_esc(g.name)+sub+x+'</button>';
+  }).join("");
+  h += '<button class="tab'+(G==="real"?' on':'')+'" onclick="setGrp(\'real\')">💰 Реал <span class="sub">· живой счёт</span></button>';
+  h += '<button class="tab tadd" onclick="createGroup()" title="создать новую группу">+ группа</button>';
+  $("tabbar").innerHTML = h;
+}
+async function loadGroups(){
+  try{ const d=await (await fetch("/api/groups")).json(); if(d.groups&&d.groups.length) GROUPS=d.groups; }catch(e){}
+  if(!_grp(G) && G!=="real"){ G="main"; localStorage.setItem("grp","main"); }   // группу удалили — на общую
+  paintTabs();
+}
 function paintTabs(){
-  $("tabMain").className = "tab"+(G==="main"?" on":"");
-  $("tabCore").className = "tab"+(G==="core"?" on":"");
-  $("tabReal").className = "tab"+(G==="real"?" on":"");
-  document.body.classList.toggle("coreview", G==="core");
+  renderTabs();
+  const g=_grp(G);
+  document.body.classList.toggle("coreview", G!=="main" && G!=="real");  // состав по ярлыку, не удалением
   $("realwrap").style.display = (G==="real")?"":"none";   // реал — отдельная вкладка
   $("paper").style.display = (G==="real")?"none":"";
-  $("heroLabel").textContent = G==="core"
+  $("heroLabel").textContent = (G==="core")
     ? "CORE-РЕАЛ — жёсткий депозит, без доливов (кончился кэш — ждём резолвов)"
+    : (g&&g.hard_cash) ? (g.name.toUpperCase()+" — жёсткий депозит, без доливов")
     : "Итого PnL — форвард";
 }
 function setGrp(g){ G=g; localStorage.setItem("grp",g); paintTabs(); closeWallet(); closeSkipped(); tick(); }
+async function createGroup(){
+  const name=(prompt("Название новой группы (вкладки):")||"").trim(); if(!name) return;
+  const label=(prompt("Ярлык-список, кошельки которого копирует группа.\nКошельки с этим «источником» попадут в группу\n(можно новый — потом перенесёшь в него кошельки):", name)||"").trim(); if(!label) return;
+  const bank=(prompt("Стартовый банкролл, $ (пусто = 10000):","10000")||"10000").trim();
+  const hard=confirm("Жёсткий депозит — без автодоливов (как Core-реал)?\nOK = да · Отмена = обычный, с доливами");
+  const r=await _adminPost("/api/create_group",{name:name,label:label,bankroll:parseFloat(bank)||10000,hard_cash:hard});
+  if(r&&r.ok){ await loadGroups(); setGrp(r.id); }
+  else if(r) alert("Не удалось создать: "+(r.error||"?"));
+}
+async function deleteGroup(ev,id){
+  ev.stopPropagation();
+  const g=_grp(id); if(!g||g.builtin) return;
+  if(!confirm("Удалить группу «"+g.name+"»?\nВкладка и опрос остановятся. Книга book_"+id+".json на диске сохранится."))return;
+  const r=await _adminPost("/api/delete_group",{id:id});
+  if(r&&r.ok){ if(G===id){ G="main"; localStorage.setItem("grp","main"); } await loadGroups(); tick(); }
+  else if(r) alert("Не удалось удалить: "+(r.error||"?"));
+}
 // --- управление списками и кошельками ---
 let LISTS=[], curList="";
 function _adminPw(){ let pw=localStorage.getItem("pw")||""; if(!pw){ pw=prompt("Пароль:")||""; if(pw) localStorage.setItem("pw",pw); } return pw; }
@@ -1242,7 +1280,8 @@ async function loadSkipped(){
       '<td>'+spc+'</td></tr>';
   }).join("") || '<tr><td colspan="9" class="empty">отфильтрованных сделок пока нет</td></tr>';
 }
-paintTabs(); applySecs(); tick(); loadLists(); setInterval(tick, 10000); setInterval(loadLists, 30000);
+loadGroups(); applySecs(); tick(); loadLists(); setInterval(tick, 10000); setInterval(loadLists, 30000);
+setInterval(loadGroups, 60000);   // подхватываем созданные/удалённые группы
 setInterval(()=>{ if(skipOpen) loadSkipped(); }, 10000);
 setInterval(()=>{ if(curWallet) loadWallet(); }, 10000);
 </script>
@@ -1257,17 +1296,25 @@ def index():
 
 @app.route("/api/state")
 def api_state():
-    bk, mk_, stt, _v, _sf = _slot(request.args.get("g", ""))
+    g = request.args.get("g", "")
+    bk, mk_, stt, _v, _sf = _slot(g)
     with _lock:
-        book = STATE[bk]
-        marks = dict(STATE[mk_])
-        status = dict(STATE[stt])
+        book = STATE.get(bk)
+        marks = dict(STATE[mk_]) if STATE.get(mk_) is not None else {}
+        status = dict(STATE[stt]) if STATE.get(stt) is not None else {}
     if book is None:
         return jsonify({"error": "group not running"}), 503
-    members = set(_core_wallets()) if bk == "core_book" else None   # вкладка = текущий состав
+    if bk == "core_book":                                          # вкладка = текущий состав
+        members, gname = set(_core_wallets()), "core"
+    elif g and g != "main":                                        # кастомная: состав по ярлыку
+        grp = next((x for x in _groups_registry() if x["id"] == g), None)
+        members = set(_group_wallets(grp["label"])) if grp else None
+        gname = g
+    else:
+        members, gname = None, "main"
     data = compute_stats(book, marks, members=members)
     data["status"] = status
-    data["group"] = "core" if bk == "core_book" else "main"
+    data["group"] = gname
     data["n_liq_skip"] = book.get("n_liq_skip", 0)
     return jsonify(data)
 
@@ -1563,6 +1610,67 @@ def api_lists():
     c = Counter(srcs.get(w, "—") for w in keys)
     lists = sorted(({"name": k, "count": v} for k, v in c.items()), key=lambda x: -x["count"])
     return jsonify({"lists": lists, "total": sum(c.values())})
+
+
+@app.route("/api/groups")
+def api_groups():
+    """Список вкладок-групп для UI: встроенные main/core + кастомные из groups.json."""
+    builtin = [{"id": "main", "name": "Общая группа", "hard_cash": False, "builtin": True},
+               {"id": "core", "name": "Core-реал", "label": "core-реал",
+                "hard_cash": True, "builtin": True}]
+    custom = [{"id": g["id"], "name": g.get("name") or g["id"], "label": g.get("label"),
+               "bankroll": g.get("bankroll"), "hard_cash": bool(g.get("hard_cash")),
+               "builtin": False} for g in _groups_registry()]
+    return jsonify({"groups": builtin + custom})
+
+
+@app.route("/api/create_group", methods=["POST"])
+def api_create_group():
+    """Создать группу (пароль в теле): {pw, name, label?, bankroll?, hard_cash?}.
+    Заводит книгу book_<id>.json + опросный контур по кошелькам ярлыка label (по умолч. = name)."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    name = (data.get("name", "") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "no name"}), 400
+    label = (data.get("label", "") or name).strip()
+    gid = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:24]
+    if not gid:
+        gid = "g" + str(int(time.time()))
+    if gid in ("main", "core", "real"):
+        return jsonify({"ok": False, "error": "reserved id"}), 400
+    reg = _groups_registry()
+    if any(x["id"] == gid for x in reg):
+        return jsonify({"ok": False, "error": "exists"}), 400
+    try:
+        bankroll = float(data.get("bankroll") or 10_000)
+    except (TypeError, ValueError):
+        bankroll = 10_000.0
+    hard = bool(data.get("hard_cash"))
+    reg.append({"id": gid, "name": name, "label": label,
+                "bankroll": bankroll, "hard_cash": hard})
+    Path("groups.json").write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+    with _lock:
+        _start_group(gid, label, bankroll, hard)
+    return jsonify({"ok": True, "id": gid, "name": name, "label": label,
+                    "bankroll": bankroll, "hard_cash": hard})
+
+
+@app.route("/api/delete_group", methods=["POST"])
+def api_delete_group():
+    """Удалить кастомную группу (пароль в теле): {pw, id}. Останавливает поток (stop-флаг)
+    и убирает из реестра. Файл book_<id>.json на диске оставляем (на случай возврата)."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    gid = (data.get("id", "") or "").strip()
+    if gid in ("main", "core", "real") or not gid:
+        return jsonify({"ok": False, "error": "bad id"}), 400
+    reg = [g for g in _groups_registry() if g["id"] != gid]
+    Path("groups.json").write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+    STATE[f"stop_{gid}"] = True                       # поток завершится на след. цикле сам
+    return jsonify({"ok": True, "id": gid})
 
 
 @app.route("/api/wallet_pause", methods=["POST"])
@@ -2148,6 +2256,18 @@ def main():
                                 max(30, args.interval // 2), core_state, None, "core"),
                           daemon=True)
     t2.start()
+
+    # КАСТОМНЫЕ ГРУППЫ (groups.json) — созданные из UI. Каждая = своя книга + вкладка +
+    # опросный контур по кошелькам своего ярлыка. main/core остаются встроенными.
+    for grp in _groups_registry():
+        try:
+            _start_group(grp["id"], grp.get("label") or grp["id"],
+                         float(grp.get("bankroll") or 10_000), bool(grp.get("hard_cash")))
+            print(f"группа [{grp.get('name')}]: ярлык «{grp.get('label')}», "
+                  f"депозит ${float(grp.get('bankroll') or 0):,.0f}"
+                  f"{' (жёсткий)' if grp.get('hard_cash') else ''}, книга book_{grp['id']}.json")
+        except Exception as ex:  # noqa: BLE001
+            print(f"группа {grp.get('id')} не поднялась: {ex}")
 
     print(f"дашборд: http://localhost:{args.port}  | целей {len(wallets)}, опрос каждые {args.interval}s")
     print(f"core-группа: депозит ${core_bankroll:,.0f} (жёсткий), книга {core_state}")
