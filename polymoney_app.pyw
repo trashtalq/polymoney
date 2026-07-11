@@ -404,7 +404,7 @@ class App(tk.Tk):
             tag, icon = "amber", "🔴"
         elif "куп" in low or "ордер:" in low or "[live]" in low or "[dry]" in low or "[smoke]" in low:
             tag, icon = "green", "🟢"
-        elif "skip" in low or "пропущ" in low:
+        elif "skip" in low or "пропуск" in low or "пропущ" in low or "не гонимся" in low:
             tag, icon = "muted", "⏭"
         elif "===" in line or "старт" in low or "сигналы:" in low or "форвард" in low:
             tag, icon = "cyan", "•"

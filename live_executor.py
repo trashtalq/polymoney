@@ -277,7 +277,18 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                               f"polymarket.com, потом ставь MODE=live.", flush=True)
                         return
             except Exception as ex:  # noqa: BLE001
-                print(f"  !! ордер не прошёл ({ex}) — сигнал НЕ помечен, повторим позже", flush=True)
+                low = str(ex).lower()
+                if "no orders found to match" in low or "no match" in low or (
+                        "fak" in low and "kill" in low):
+                    # рынок ушёл ВЫШЕ нашего потолка (цена сигнала +2¢): встречных продавцов по
+                    # нашей цене нет. Это штатный отказ от догона (не ошибка) — НЕ тратим, помечаем
+                    # сигнал пройденным, чтобы не слать пустые заявки на биржу каждый цикл.
+                    print(f"  пропуск: рынок ушёл выше нашей цены ~${cap:.2f}, не гонимся — {title}",
+                          flush=True)
+                    state["done"].append(k)
+                    st_save(state)
+                else:
+                    print(f"  !! ордер не прошёл ({ex}) — сигнал НЕ помечен, повторим позже", flush=True)
 
         # --- ВЫХОДЫ: цель ПРОДАЛА (до резолва) -> продаём свою позицию ЦЕЛИКОМ. Мелкие скейл-ауты
         # (доля < exit_min_frac) игнорим; smoke выходы не трогает (он про проверку входа). ---
