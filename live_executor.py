@@ -334,7 +334,8 @@ def main():
     max_per_wallet = float(cfg.get("MAX_PER_WALLET_DAY") or 5)  # не больше $X/день на один кошелёк
     max_resolve_days = float(cfg.get("MAX_RESOLVE_DAYS") or 0)  # 0 = БЕЗ фильтра резолва (капитал
     #   освобождают ВЫХОДЫ вслед за целью, не пред-фильтр; цели флипают и долгие рынки)
-    exit_min_frac = float(cfg.get("EXIT_MIN_FRAC") or 0.5)      # выходим, если цель продала >= этой доли
+    exit_min_frac = float(cfg.get("EXIT_MIN_FRAC") or 0.1)      # выходим, как только цель продала >= этой
+    #   доли своего холдинга (0.1 = на первую значимую продажу; 0.01 = на ЛЮБУЮ; выше = только на крупный выход)
 
     rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
     print(f"=== live_executor | MODE={mode.upper()} | депозит ${deposit} | ставка ${per_trade} | "
