@@ -32,11 +32,36 @@ import copy_trader as ct
 
 app = Flask(__name__)
 
-# Пароль на изменяющие действия (удаление кошелька). В репо хранится только ХЭШ, не сам пароль.
-# Можно переопределить на сервере через env ADMIN_PASS. По умолчанию — заданный пользователем.
+# Пароль на изменяющие действия. БЕЗОПАСНОСТЬ: слабого дефолта БОЛЬШЕ НЕТ. Пароль берётся ТОЛЬКО
+# из env ADMIN_PASS (задаётся на сервере в gitignored .env, НЕ в публичном docker-compose.yml).
+# Если ADMIN_PASS не задан -> ADMIN_HASH=None -> все пишущие эндпоинты ВЫКЛЮЧЕНЫ (дашборд только
+# на чтение). Так публичный читатель репо не может ничего изменить (раньше хэш «супер» лежал в коде).
 ADMIN_HASH = (hashlib.sha256(os.environ["ADMIN_PASS"].encode("utf-8")).hexdigest()
-              if os.environ.get("ADMIN_PASS")
-              else "a7a73bb77842473cec098b5635043d41654b66dff80475a9f6a6178b6b36ea34")
+              if os.environ.get("ADMIN_PASS") else None)
+
+_AUTH_FAILS = {}          # ip -> [неудач, ts_первой] — троттлинг брутфорса пароля
+
+
+def _admin_denied(data):
+    """None если запрос авторизован; иначе (response, code) для немедленного возврата.
+    (1) нет ADMIN_PASS -> запись выключена (403); (2) >=8 неудач/5мин с IP -> лок (429);
+    (3) неверный пароль -> 401 и +1 к счётчику; успех -> счётчик сброшен."""
+    if ADMIN_HASH is None:
+        return jsonify({"ok": False, "error": "writes disabled: set ADMIN_PASS on server"}), 403
+    ip = request.remote_addr or "?"
+    now = time.time()
+    c = _AUTH_FAILS.get(ip)
+    if c and c[0] >= 8 and now - c[1] < 300:
+        return jsonify({"ok": False, "error": "too many attempts — wait a few minutes"}), 429
+    pw = (data or {}).get("pw", "") or ""
+    if hashlib.sha256(pw.encode("utf-8")).hexdigest() != ADMIN_HASH:
+        if not c or now - c[1] >= 300:
+            _AUTH_FAILS[ip] = [1, now]
+        else:
+            c[0] += 1
+        return jsonify({"ok": False, "error": "auth"}), 401
+    _AUTH_FAILS.pop(ip, None)
+    return None
 
 
 _lock = threading.Lock()
@@ -1484,8 +1509,9 @@ def api_remove_wallet():
     «как будто его никогда не было» (purge_wallet): убрать его позиции/сделки/теневые записи,
     заново свести realized/bankroll/cash/topups. Файл watchlist перечитывается на лету."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     addr = (data.get("wallet", "") or "").lower()
     if not addr:
         return jsonify({"ok": False, "error": "no wallet"}), 400
@@ -1528,8 +1554,9 @@ def api_rescale():
     Идемпотентно: передаём ЦЕЛЕВОЙ банкролл (to_bankroll), множитель считается от текущего,
     поэтому повторный вызов с той же целью = множитель ~1 (без эффекта). Пароль в теле."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     with _lock:
         cur = float(STATE["book"].get("bankroll", 0.0) or 0.0)
         to = data.get("to_bankroll")
@@ -1629,8 +1656,9 @@ def api_create_group():
     """Создать группу (пароль в теле): {pw, name, label?, bankroll?, hard_cash?}.
     Заводит книгу book_<id>.json + опросный контур по кошелькам ярлыка label (по умолч. = name)."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     name = (data.get("name", "") or "").strip()
     if not name:
         return jsonify({"ok": False, "error": "no name"}), 400
@@ -1662,8 +1690,9 @@ def api_delete_group():
     """Удалить кастомную группу (пароль в теле): {pw, id}. Останавливает поток (stop-флаг)
     и убирает из реестра. Файл book_<id>.json на диске оставляем (на случай возврата)."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     gid = (data.get("id", "") or "").strip()
     if gid in ("main", "core", "real") or not gid:
         return jsonify({"ok": False, "error": "bad id"}), 400
@@ -1678,8 +1707,9 @@ def api_wallet_pause():
     """Вкл/выкл копи для ОДНОГО кошелька (пароль в теле): {pw, wallet, paused: true|false}.
     Пауза = движок не копирует его НОВЫЕ входы (фильтр из целей); позиции доживают, статистика идёт."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     addr = (data.get("wallet", "") or "").lower()
     if not (addr.startswith("0x") and len(addr) == 42):
         return jsonify({"ok": False, "error": "bad wallet"}), 400
@@ -1702,8 +1732,9 @@ def api_wallet_filters():
     {pw, wallet, filter: band|adverse|avg_up|cap|sport|weather, enabled: true|false}.
     enabled=false -> фильтр для этого кошелька выключен (сделки, которые он резал, копируются)."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     addr = (data.get("wallet", "") or "").lower()
     filt = (data.get("filter", "") or "").lower()
     if not (addr.startswith("0x") and len(addr) == 42) or filt not in ct.FILTER_NAMES:
@@ -1729,8 +1760,9 @@ def api_set_source():
     {pw, sources: {addr: "метка", ...}}. Только правка ярлыков в wallet_sources.json —
     watchlist и книгу не трогает (метка видна в колонке «Источник»)."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     src_map = data.get("sources") or {}
     if not isinstance(src_map, dict) or not src_map:
         return jsonify({"ok": False, "error": "no sources"}), 400
@@ -1764,8 +1796,9 @@ def api_reset():
     """ПОЛНЫЙ СБРОС бумажной статистики группы (пароль в теле): {pw, g: ""|"core"}.
     Форвард с нуля. Реальный on-chain счёт (панель /api/real) НЕ трогается — он вне книги."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     bk, _m, _s, ver, sf = _slot(data.get("g", ""))
     with _lock:
         if STATE.get(bk) is None:
@@ -1784,8 +1817,9 @@ def api_set_real_account():
     """Задать ПУБЛИЧНЫЙ адрес реального счёта бота (пароль в теле). Только адрес, не ключ —
     дашборд тянет по нему сделки/PnL из data-api. Хранится локально (gitignored)."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     addr = (data.get("address", "") or "").lower().strip()
     if not (addr.startswith("0x") and len(addr) == 42):
         return jsonify({"ok": False, "error": "bad address"}), 400
@@ -1972,8 +2006,9 @@ def api_materialize():
     журнала -> в книгу стандартной ставкой. body: {pw, g: ""|"core", per_trade?}.
     Резолвы добираем оракулом ДО лока (сеть), материализуем под локом (мгновенно)."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     bk, _m, _s, ver, sf = _slot(data.get("g", ""))
     per_trade = float(data.get("per_trade") or STATE["cfg"].get("per_trade") or 10)
     # фаза 1: без лока собираем cid кандидатов без резолва и добираем исходы оракулом
@@ -2007,8 +2042,9 @@ def api_pause():
     Пауза = новые ВХОДЫ не копируются; выходы целей, резолвы и оценка позиций работают.
     Флаг живёт в книге -> переживает рестарты контейнера."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     with _lock:                          # пауза — общий рубильник: действует на ОБЕ книги
         STATE["book"]["paused"] = bool(data.get("paused"))
         STATE["book_ver"] += 1          # снимок в полёте у poll_loop устарел — не даём затереть флаг
@@ -2033,8 +2069,9 @@ def api_add_wallet():
     Дедуп по текущему списку; вручную удалённые (wallet_sources=удалён-вручную) НЕ возвращаем
     (их выкинули осознанно), если не передан force=true. Hot-reload подхватит без рестарта."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     ws = [(w or "").lower().strip() for w in (data.get("wallets") or [])]
     ws = [w for w in ws if w.startswith("0x") and len(w) == 42]
     if not ws:
@@ -2082,8 +2119,9 @@ def api_renorm():
     """Восстановление смешанного масштаба книги -> единый /10 (per_trade=10). Пароль в теле.
     Нужно один раз после того, как PER_TRADE наконец доехал на сервер (см. renorm_book)."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     tb = float(data.get("target_base", 10000.0))
     with _lock:
         res = ct.renorm_book(STATE["book"], target_base=tb)
@@ -2100,8 +2138,9 @@ def api_purge_blocked():
     """Пересчитать ВСЕ книги (main + core + кастомные группы) как будто заблокированные
     рынки (спорт/погода/твит-каунт) никогда не копировались (пароль в теле)."""
     data = request.get_json(silent=True) or {}
-    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
-        return jsonify({"ok": False, "error": "auth"}), 401
+    _bad = _admin_denied(data)
+    if _bad:
+        return _bad
     purged = {}
     with _lock:
         for g in ["main", "core"] + [x["id"] for x in _groups_registry()]:

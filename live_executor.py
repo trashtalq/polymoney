@@ -36,6 +36,41 @@ import requests
 
 HERE = Path(__file__).resolve().parent
 STATE_FILE = HERE / "live_exec_state.json"      # что уже исполнено + счётчики дня (локально)
+ALLOW_FILE = HERE / "copy_allowlist.json"       # белый список кошельков (защита от инъекции сигналов)
+_ALLOW = {"mtime": 0, "set": set()}
+
+
+def load_allowlist() -> set:
+    """Локальный белый список кошельков, которые бот СОГЛАСЕН копировать. Даже если наш сервер
+    взломан и подсунул в /api/signals чужой кошелёк — его тут нет, и бот его НЕ копирует. Пустой
+    список/нет файла = не настроен (не фильтруем). Перечитывается при изменении файла."""
+    try:
+        m = ALLOW_FILE.stat().st_mtime
+        if m != _ALLOW["mtime"]:
+            _ALLOW["set"] = {str(w).lower() for w in json.loads(ALLOW_FILE.read_text(encoding="utf-8"))}
+            _ALLOW["mtime"] = m
+    except Exception:  # noqa: BLE001
+        pass
+    return _ALLOW["set"]
+
+
+def seed_allowlist(s, server, group):
+    """Если файла нет — создаём из ТЕКУЩЕГО состава группы на сервере (доверие первого запуска).
+    Дальше список НЕ обновляется автоматически: инъекция нового кошелька на сервер его не добавит."""
+    if ALLOW_FILE.exists():
+        return
+    try:
+        r = s.get(f"{server}/api/state", params={"g": group}, timeout=20).json()
+        addrs = sorted({(w.get("wallet") or "").lower()
+                        for w in r.get("per_wallet", []) if w.get("wallet")})
+        if addrs:
+            ALLOW_FILE.write_text(json.dumps(addrs, ensure_ascii=False, indent=1), encoding="utf-8")
+            print(f"allowlist: создан из текущего ядра ({len(addrs)} кошельков). "
+                  f"Новые кошельки добавляй через пульт.", flush=True)
+        else:
+            print("allowlist: ядро пустое — файл не создан, ЗАЩИТА ВЫКЛ (копирую всех).", flush=True)
+    except Exception as ex:  # noqa: BLE001
+        print(f"allowlist: не удалось засеять ({ex}) — ЗАЩИТА ВЫКЛ (копирую всех).", flush=True)
 
 
 def load_env():
@@ -137,6 +172,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
              max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    seed_allowlist(s, server, group)                  # белый список из текущего ядра, если ещё нет
     state = st_load()
     state.setdefault("spent_by_wallet", {})           # адрес цели -> $ потрачено за день (лимит на кошелёк)
     session_add = {}          # tok -> $ добавлено ЭТИМ процессом (страхует settle-лаг чейна)
@@ -185,6 +221,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             state["spent_day"] = 0.0
             state["spent_by_wallet"] = {}
 
+        allow = load_allowlist()                      # белый список кошельков (перечитывается на лету)
         for sig in r.get("signals", []):
             k = sig_key(sig)
             state["last_t"] = max(state["last_t"], sig["t"])
@@ -192,6 +229,12 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 continue
             px = sig.get("px") or 0
             title = (sig.get("title") or "")[:48]
+            # --- ЗАЩИТА ОТ ИНЪЕКЦИИ СИГНАЛОВ: копируем только кошельки из локального allowlist ---
+            if allow and (sig.get("w", "") or "").lower() not in allow:
+                print(f"  пропуск: {(sig.get('w','') or '')[:10]}… НЕ в локальном allowlist "
+                      f"(сигнал мог быть подсунут) — {title[:36]}", flush=True)
+                state["done"].append(k)
+                continue
             # --- гварды ---
             age = srv_now - sig.get("t", srv_now)
             if age > max_age:                         # СТАРЫЙ сигнал (цена уже уехала) — не копируем

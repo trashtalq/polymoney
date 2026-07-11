@@ -37,6 +37,7 @@ ENV_EXAMPLE = HERE / "polymarket.env.example"
 STATE = HERE / "live_exec_state.json"
 SETTINGS = HERE / "app_settings.json"          # {server, pw} — локально, в gitignore
 BOT = HERE / "live_executor.py"
+ALLOW_FILE = HERE / "copy_allowlist.json"      # белый список бота — держим в синхроне с копи
 
 # ── палитра (неон-терминал, как дашборд) ──────────────────────────────────────
 BG = "#0b0f1a"; PANEL = "#0f1826"; CARD = "#122034"
@@ -104,6 +105,22 @@ def load_settings() -> dict:
 
 def save_settings(d: dict):
     SETTINGS.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def allow_update(add=None, remove=None):
+    """Держим локальный белый список бота в синхроне: добавили кошелёк в копи -> он и в allowlist,
+    убрали -> и оттуда. Бот копирует только адреса из этого файла (защита от инъекции сигналов)."""
+    try:
+        cur = set()
+        if ALLOW_FILE.exists():
+            cur = {str(w).lower() for w in json.loads(ALLOW_FILE.read_text(encoding="utf-8"))}
+        if add:
+            cur.add(add.lower())
+        if remove:
+            cur.discard(remove.lower())
+        ALLOW_FILE.write_text(json.dumps(sorted(cur), ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def positions_value(funder: str):
@@ -578,8 +595,9 @@ class App(tk.Tk):
             return
         r = self._api_post("/api/add_wallet", {"pw": pw, "wallets": [addr], "source": CORE_LABEL})
         if r and r.get("ok"):
+            allow_update(add=addr)                 # синхроним локальный allowlist бота
             self.addr_var.set("")
-            self._log_raw(f"➕ Добавлен в копи: {addr[:10]}…", "green")
+            self._log_raw(f"➕ Добавлен в копи (и в allowlist): {addr[:10]}…", "green")
             self.refresh_wallets()
         elif r:
             messagebox.showerror("Не добавилось", str(r.get("error", r)))
@@ -615,7 +633,8 @@ class App(tk.Tk):
             return
         r = self._api_post("/api/remove_wallet", {"pw": pw, "wallet": row["addr"]})
         if r and r.get("ok"):
-            self._log_raw(f"✕ Убран из копи: {row['addr'][:10]}…", "red")
+            allow_update(remove=row["addr"])       # синхроним локальный allowlist бота
+            self._log_raw(f"✕ Убран из копи (и из allowlist): {row['addr'][:10]}…", "red")
             self.refresh_wallets()
         elif r:
             messagebox.showerror("Не вышло", str(r.get("error", r)))
