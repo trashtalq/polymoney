@@ -25,6 +25,7 @@ PnL по закрытым сделкам = честный результат с�
 import argparse
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -102,9 +103,22 @@ def _is_mention(t: str) -> bool:
     return any(k in t for k in MENTION_KW) and "time" in t     # "...say X 5+ times..."
 
 
+# НЕ копируем рынки «сколько твитов напишет X за неделю» — числовые корзины (180-199, <40, 200+).
+# Анализ 2026-07-12: у кошельков core-реал on-chain по ним −$3.5k (99 позиций сгорели в ноль):
+# они продают премию на узкую корзину, а когда она попадает — позиция гаснет на −100%
+# («копейки перед катком»). Ловим структуру «<N / N-M / N+ / N tweets», не трогая mention-рынки.
+_TWEETCOUNT_RE = re.compile(r"(?:<\s*\d+|\d+\s*\+|\d+\s*[-–—]\s*\d+|\b\d+)\s*tweets?\b", re.I)
+
+
+def _is_tweet_count(t: str) -> bool:
+    return bool(_TWEETCOUNT_RE.search(t))
+
+
 def _blocked_reason(title: str):
-    """Возвращает 'sport'/'weather' если рынок не копируем, иначе None."""
+    """Возвращает 'sport'/'weather'/'tweets' если рынок не копируем, иначе None."""
     t = (title or "").lower()
+    if _is_tweet_count(t):
+        return "tweets"                                # твит-каунт-корзины: категория без эджа
     if any(k in t for k in SPORT_MARKET_KW):
         if _is_mention(t):
             return None                                # mention-рынок: спорт-фильтр не про него
