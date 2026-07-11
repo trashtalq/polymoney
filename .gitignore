@@ -57,3 +57,4 @@ adds_history.jsonl
 polymarket.env
 live_exec_state.json
 real_account.json
+paused_wallets.json

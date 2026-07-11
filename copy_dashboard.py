@@ -73,6 +73,27 @@ def _core_wallets() -> list:
         return []
 
 
+# ----------------------------- пер-кошельковая пауза копи -----------------------------
+_PAUSED = {"mtime": 0, "set": set()}
+
+
+def _paused_wallets() -> set:
+    """Адреса на паузе (paused_wallets.json) — их движок НЕ копирует (фильтруем из целей),
+    но позиции доживают и статистика идёт. Перечитывается при изменении файла."""
+    p = Path("paused_wallets.json")
+    if not p.exists():
+        _PAUSED["set"], _PAUSED["mtime"] = set(), 0
+        return _PAUSED["set"]
+    try:
+        m = p.stat().st_mtime
+        if m != _PAUSED["mtime"]:
+            _PAUSED["set"] = {w.lower() for w in json.loads(p.read_text(encoding="utf-8"))}
+            _PAUSED["mtime"] = m
+    except Exception:  # noqa: BLE001
+        pass
+    return _PAUSED["set"]
+
+
 # ----------------------------- источник кошелька (какой скан нашёл) -----------------------------
 _SRC = {"mtime": 0, "map": {}}
 
@@ -169,6 +190,7 @@ def compute_stats(book: dict, marks: dict, members: set | None = None) -> dict:
         stat[w]["open_n"] += 1                        # число открытых позиций (усреднения уже слиты)
 
     sources = get_sources()
+    paused_set = _paused_wallets()                    # пер-кошельковая пауза копи (для UI-индикации)
     MIN_CLOSED_FOR_VERDICT = 8                        # вердикт только после N ЗАКРЫТЫХ сделок
     per_wallet = []
     for w, s in stat.items():
@@ -197,6 +219,7 @@ def compute_stats(book: dict, marks: dict, members: set | None = None) -> dict:
             "delay": round(s["delay"], 2),            # $ переплаты за задержку копира на входах
             "flag": flag,
             "source": sources.get(w, "—"),
+            "copy_paused": w.lower() in paused_set,   # копи этого кошелька приостановлено вручную
         })
     if members is not None:                          # core: только текущий состав + новые с нулём
         per_wallet = [w for w in per_wallet if w["wallet"].lower() in members]
@@ -206,7 +229,8 @@ def compute_stats(book: dict, marks: dict, members: set | None = None) -> dict:
                 per_wallet.append({"wallet": m, "copied": 0, "closed": 0, "win_rate": 0.0,
                                    "open_n": 0, "realized": 0.0, "unrealized": 0.0, "total": 0.0,
                                    "open_val": 0.0, "spent": 0.0, "delay": 0.0, "flag": "",
-                                   "source": sources.get(m, "core-реал")})
+                                   "source": sources.get(m, "core-реал"),
+                                   "copy_paused": m in paused_set})
     # ---- PnL «за сегодня»: ЕДИНЫЙ дневной снимок ПО КОШЕЛЬКАМ (сброс в полночь сервера) ----
     # Храним ТОЛЬКО пер-кошельковый срез на начало суток. Карточку считаем как сумму «сегодня»
     # по видимым кошелькам — тогда верх и таблица всегда сходятся, и удаление кошелька всегда
@@ -322,6 +346,9 @@ def poll_loop(api, wallets, per_trade, slippage, interval, state_file, wl_path=N
                 wallets = _core_wallets() or wallets        # группа = ярлык core-реал (горячо)
             else:
                 wallets = _reload_wallets(wl_path, wallets)  # перечитываем список целей каждый цикл
+            paused = _paused_wallets()                       # пер-кошельковая пауза: не копируем их входы
+            if paused:
+                wallets = [w for w in wallets if w.lower() not in paused]
             with _lock:
                 STATE[stt]["polling"] = True
                 STATE[stt]["wallets"] = len(wallets)
@@ -424,6 +451,25 @@ PAGE = r"""<!doctype html>
        background:rgba(255,194,61,.07);border:1px solid rgba(255,194,61,.35);
        box-shadow:0 0 18px rgba(255,194,61,.10)}
   .pausebar.show{display:block}
+  .mgmt{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 0 10px}
+  .inp{font:inherit;font-size:12px;color:var(--text);background:rgba(10,18,30,.7);
+       border:1px solid var(--border);border-radius:9px;padding:8px 12px;outline:none;width:340px;max-width:100%}
+  .inp:focus{border-color:var(--accent)}
+  .inp::placeholder{color:var(--dim)}
+  .mgmthint{color:var(--muted);font-size:11px}
+  .lchips{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px}
+  .lchip{cursor:pointer;padding:4px 12px;border-radius:999px;font-size:12px;color:var(--muted);
+       border:1px solid var(--border);background:rgba(10,18,30,.5);transition:all .12s}
+  .lchip:hover{border-color:var(--border2);color:var(--text)}
+  .lchip.on{color:#04060b;background:var(--accent);border-color:var(--accent);font-weight:700}
+  .lchip b{opacity:.7;font-weight:400}
+  .rtag.lst{cursor:pointer;transition:all .12s}
+  .rtag.lst:hover{color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+  .tog{cursor:pointer;color:var(--amber);font-weight:700;padding:2px 7px;border-radius:7px;transition:all .12s}
+  .tog:hover{background:rgba(255,194,61,.2)}
+  .tog.on{color:var(--green)} .tog.on:hover{background:rgba(43,245,176,.2)}
+  tr.wpaused{opacity:.5} tr.wpaused:hover{opacity:.8}
+  tr.wpaused td:first-child{box-shadow:inset 3px 0 0 var(--amber)}
   .tabs{display:flex;gap:8px;margin:16px 0 2px}
   .tab{cursor:pointer;font:inherit;font-size:12px;font-weight:800;letter-spacing:1.2px;
        text-transform:uppercase;color:var(--muted);background:rgba(10,18,30,.55);
@@ -592,9 +638,17 @@ PAGE = r"""<!doctype html>
   <div class="spark"><svg id="spark" width="100%" height="132" preserveAspectRatio="none"></svg></div>
 
   <div class="sec">По кошелькам — авто-ранжирование по форвардному PnL</div>
+  <div class="mgmt">
+    <input id="addAddr" class="inp" placeholder="0x… адрес кошелька" maxlength="42" spellcheck="false">
+    <input id="addList" class="inp" list="listnames" placeholder="список (напр. политика)" style="width:170px">
+    <datalist id="listnames"></datalist>
+    <button class="btn go" onclick="addWallet()">+ Добавить</button>
+    <span class="mgmthint">клик по списку в строке — перенести кошелёк · ⏸ — пауза копи</span>
+  </div>
+  <div class="lchips" id="lchips"></div>
   <div class="tblwrap wide">
   <table>
-    <thead><tr><th>#</th><th>Кошелёк</th><th>Источник</th><th>Скопир.</th><th>Задейств.</th><th>Закрыто</th><th>Открыто</th><th>Винрейт</th><th>Реализ. PnL</th><th>Нереализ. PnL</th><th>PnL итого</th><th>За сегодня</th><th title="переплата против цены цели из-за задержки копирования">Задержка$</th><th>Статус</th><th></th></tr></thead>
+    <thead><tr><th>#</th><th>Кошелёк</th><th>Список</th><th>Скопир.</th><th>Задейств.</th><th>Закрыто</th><th>Открыто</th><th>Винрейт</th><th>Реализ. PnL</th><th>Нереализ. PnL</th><th>PnL итого</th><th>За сегодня</th><th title="переплата против цены цели из-за задержки копирования">Задержка$</th><th>Статус</th><th></th></tr></thead>
     <tbody id="wallets"></tbody>
   </table>
   </div>
@@ -688,6 +742,43 @@ function paintTabs(){
     : "Итого PnL — форвард";
 }
 function setGrp(g){ G=g; localStorage.setItem("grp",g); paintTabs(); closeWallet(); closeSkipped(); tick(); }
+// --- управление списками и кошельками ---
+let LISTS=[], curList="";
+function _adminPw(){ let pw=localStorage.getItem("pw")||""; if(!pw){ pw=prompt("Пароль:")||""; if(pw) localStorage.setItem("pw",pw); } return pw; }
+async function _adminPost(url, body){
+  const pw=_adminPw(); if(!pw) return null;
+  try{
+    const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({pw:pw},body))});
+    if(resp.status===401){ localStorage.removeItem("pw"); alert("Неверный пароль — попробуй ещё раз"); return null; }
+    return await resp.json();
+  }catch(e){ alert("Ошибка сети"); return null; }
+}
+async function loadLists(){
+  let d; try{ d=await (await fetch("/api/lists")).json(); }catch(e){ return; }
+  LISTS=(d.lists||[]).map(x=>x.name);
+  $("listnames").innerHTML=LISTS.map(n=>'<option value="'+n+'">').join("");
+  $("lchips").innerHTML='<span class="lchip'+(curList===""?" on":"")+'" onclick="setList(\'\')">все <b>'+(d.total||0)+'</b></span>'+
+    (d.lists||[]).map(x=>'<span class="lchip'+(curList===x.name?" on":"")+'" onclick="setList(\''+(x.name||"").replace(/\\/g,"\\\\").replace(/'/g,"\\'")+'\')">'+(x.name||"—")+' <b>'+x.count+'</b></span>').join("");
+}
+function setList(n){ curList=n; loadLists(); tick(); }
+async function addWallet(){
+  const a=(($("addAddr").value)||"").trim().toLowerCase();
+  const lst=(($("addList").value)||"").trim()||"добавлен-вручную";
+  if(!/^0x[0-9a-f]{40}$/.test(a)){ alert("Адрес должен быть 0x… (42 символа hex)"); return; }
+  const r=await _adminPost("/api/add_wallet",{wallets:[a],source:lst});
+  if(r&&r.ok){ $("addAddr").value=""; alert(r.added?("Добавлен в список «"+lst+"»"):"Уже в списке (дубль)"); loadLists(); tick(); }
+  else if(r) alert("Не удалось: "+(r.error||""));
+}
+async function moveWallet(a){
+  const to=(prompt("Перенести "+shortAddr(a)+" в список"+(LISTS.length?" (есть: "+LISTS.join(", ")+")":"")+":\nможно ввести НОВОЕ имя — список создастся")||"").trim();
+  if(!to) return;
+  const r=await _adminPost("/api/set_source",{sources:JSON.parse('{"'+a+'":'+JSON.stringify(to)+'}')});
+  if(r&&r.ok){ loadLists(); tick(); } else if(r) alert("Не удалось: "+(r.error||""));
+}
+async function toggleWalletPause(a,paused){
+  const r=await _adminPost("/api/wallet_pause",{wallet:a,paused:paused});
+  if(r&&r.ok) tick(); else if(r) alert("Не удалось: "+(r.error||""));
+}
 async function loadReal(){
   let d; try{ d=await (await fetch("/api/real")).json(); }catch(e){ return; }
   if(!d.configured){ $("realaddr").textContent="(адрес не задан)"; $("realhero").textContent="—"; return; }
@@ -976,10 +1067,12 @@ async function tick(){
     const c = p>=60?"var(--green)":(p>=40?"var(--accent)":"var(--red)");
     return '<span class="wr"><i style="width:'+Math.max(3,Math.round(p*.45))+'px;background:'+c+
            ';box-shadow:0 0 7px '+c+'"></i><b>'+p+'%</b></span>'; };
-  $("wallets").innerHTML = (d.per_wallet||[]).map((w,i)=>
-    '<tr><td class="rank num'+(i<3?' r'+(i+1):'')+'">'+(i+1)+'</td>'+
-    '<td>'+addrLink(w.wallet)+'</td>'+
-    '<td><span class="rtag">'+(w.source||"—")+'</span></td>'+
+  let pw = (d.per_wallet||[]);
+  if(curList) pw = pw.filter(w=>(w.source||"—")===curList);   // фильтр по выбранному списку
+  $("wallets").innerHTML = pw.map((w,i)=>
+    '<tr class="'+(w.copy_paused?"wpaused":"")+'"><td class="rank num'+(i<3?' r'+(i+1):'')+'">'+(i+1)+'</td>'+
+    '<td>'+addrLink(w.wallet)+(w.copy_paused?' <span class="rtag" style="color:var(--amber)">пауза</span>':'')+'</td>'+
+    '<td><span class="rtag lst" title="перенести в другой список" onclick="moveWallet(\''+w.wallet+'\')">'+(w.source||"—")+'</span></td>'+
     '<td class="num">'+w.copied+'</td>'+
     '<td class="num muted">'+money(w.spent)+'</td>'+
     '<td class="num">'+w.closed+'</td>'+
@@ -991,8 +1084,9 @@ async function tick(){
     '<td class="num '+cls(w.today||0)+'">'+(w.today!=null?money(w.today):'—')+'</td>'+
     '<td class="num '+((w.delay||0)>(w.spent||0)*0.02?"neg":((w.delay||0)<-0.005?"pos":"muted"))+'" title="плюс (красный) = переплатили из-за задержки копира; минус (зелёный) = вошли ЛУЧШЕ цены цели — задержка сыграла за нас">'+money(w.delay||0)+'</td>'+
     '<td>'+flagBadge(w.flag)+'</td>'+
-    '<td><span class="del" title="удалить кошелёк" onclick="removeWallet(\''+w.wallet+'\')">✕</span></td></tr>').join("")
-    || '<tr><td colspan="15" class="empty">пока ничего не скопировано — ждём первые сделки целей</td></tr>';
+    '<td style="white-space:nowrap"><span class="tog'+(w.copy_paused?" on":"")+'" title="'+(w.copy_paused?"включить копи":"пауза копи (стоп новых входов)")+'" onclick="toggleWalletPause(\''+w.wallet+'\','+(w.copy_paused?"false":"true")+')">'+(w.copy_paused?"▶":"⏸")+'</span> '+
+    '<span class="del" title="удалить кошелёк" onclick="removeWallet(\''+w.wallet+'\')">✕</span></td></tr>').join("")
+    || '<tr><td colspan="15" class="empty">'+(curList?"в этом списке пусто":"пока ничего не скопировано — ждём первые сделки целей")+'</td></tr>';
 
   $("open").innerHTML = (d.open_positions||[]).map(p=>{
     const pl = p.pnl!=null ? p.pnl : (p.val-p.cost);
@@ -1064,7 +1158,7 @@ async function loadSkipped(){
       '<td>'+spc+'</td></tr>';
   }).join("") || '<tr><td colspan="9" class="empty">отфильтрованных сделок пока нет</td></tr>';
 }
-paintTabs(); tick(); setInterval(tick, 10000);
+paintTabs(); tick(); loadLists(); setInterval(tick, 10000); setInterval(loadLists, 30000);
 setInterval(()=>{ if(skipOpen) loadSkipped(); }, 10000);
 setInterval(()=>{ if(curWallet) loadWallet(); }, 10000);
 </script>
@@ -1371,6 +1465,41 @@ def api_discovery():
         out["adds_history_n"] = 0
         out["adds_recent"] = []
     return jsonify(out)
+
+
+@app.route("/api/lists")
+def api_lists():
+    """Списки (= ярлыки source) и сколько в каждом кошельков из watchlist. Для UI-фильтра/переноса."""
+    from collections import Counter
+    srcs = get_sources()
+    wl = get_watchlist()
+    keys = [w for w in wl] if wl else list(srcs.keys())
+    c = Counter(srcs.get(w, "—") for w in keys)
+    lists = sorted(({"name": k, "count": v} for k, v in c.items()), key=lambda x: -x["count"])
+    return jsonify({"lists": lists, "total": sum(c.values())})
+
+
+@app.route("/api/wallet_pause", methods=["POST"])
+def api_wallet_pause():
+    """Вкл/выкл копи для ОДНОГО кошелька (пароль в теле): {pw, wallet, paused: true|false}.
+    Пауза = движок не копирует его НОВЫЕ входы (фильтр из целей); позиции доживают, статистика идёт."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    addr = (data.get("wallet", "") or "").lower()
+    if not (addr.startswith("0x") and len(addr) == 42):
+        return jsonify({"ok": False, "error": "bad wallet"}), 400
+    p = Path("paused_wallets.json")
+    try:
+        cur = {w.lower() for w in json.loads(p.read_text(encoding="utf-8"))} if p.exists() else set()
+    except Exception:  # noqa: BLE001
+        cur = set()
+    if data.get("paused"):
+        cur.add(addr)
+    else:
+        cur.discard(addr)
+    p.write_text(json.dumps(sorted(cur), ensure_ascii=False, indent=1), encoding="utf-8")
+    return jsonify({"ok": True, "wallet": addr, "paused": bool(data.get("paused")), "n_paused": len(cur)})
 
 
 @app.route("/api/set_source", methods=["POST"])
