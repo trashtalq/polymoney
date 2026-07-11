@@ -106,6 +106,17 @@ def save_settings(d: dict):
     SETTINGS.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def positions_value(funder: str):
+    """Стоимость открытых позиций ($) с Polymarket — data-api /value, БЕЗ приватного ключа."""
+    if not funder or requests is None:
+        return None
+    try:
+        v = requests.get(f"https://data-api.polymarket.com/value?user={funder}", timeout=12).json()
+        return float(v[0]["value"]) if isinstance(v, list) and v else 0.0
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ───────────────────────────────── приложение ────────────────────────────────
 class App(tk.Tk):
     def __init__(self):
@@ -117,14 +128,16 @@ class App(tk.Tk):
         self.proc = None
         self.q = queue.Queue()
         self.wallet_rows = {}      # iid -> {"addr":..., "paused":bool}
+        self._client = None        # SDK-клиент для баланса (создаётся лениво по ключу, локально)
         self._style()
         self._build()
         self._load_into_fields()
         self.after(200, self._pump)
         self.after(500, self._refresh_status)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        # первая загрузка кошельков (не блокируя старт окна)
+        # первая загрузка кошельков + баланса (не блокируя старт окна)
         self.after(300, lambda: self.refresh_wallets(quiet=True))
+        self.after(700, self._poll_account)
 
     # ── стили ──
     def _style(self):
@@ -144,6 +157,8 @@ class App(tk.Tk):
                      font=("Consolas", 16, "bold"))
         st.configure("Sub.TLabel", background=BG, foreground=MUT, font=("Segoe UI", 9))
         st.configure("Stat.TLabel", background=PANEL, foreground=TXT, font=("Consolas", 11))
+        st.configure("Money.TLabel", background=PANEL, foreground=GRN, font=("Consolas", 14, "bold"))
+        st.configure("Cash.TLabel", background=PANEL, foreground=ACC, font=("Consolas", 14, "bold"))
         st.configure("TButton", background=CARD, foreground=TXT, borderwidth=0,
                      padding=(12, 8), font=("Segoe UI", 10, "bold"))
         st.map("TButton", background=[("active", BORD)])
@@ -200,8 +215,17 @@ class App(tk.Tk):
         self.stat_lbl = ttk.Label(bar, text="остановлен", style="Stat.TLabel")
         self.stat_lbl.pack(side="left")
         ttk.Label(bar, text="", style="Card.TLabel").pack(side="left", expand=True, fill="x")
-        self.spend_lbl = ttk.Label(bar, text="сегодня: $0.00", style="Stat.TLabel")
-        self.spend_lbl.pack(side="right")
+        # ── баланс Polymarket: портфель (позиции+наличные) и «Доступно» (кэш, по ключу локально) ──
+        money = ttk.Frame(bar, style="Card.TFrame")
+        money.pack(side="right")
+        for c, cap in ((0, "Портфель"), (1, "Доступно"), (2, "Сегодня")):
+            ttk.Label(money, text=cap, style="Field.TLabel").grid(row=0, column=c, padx=(20, 0), sticky="w")
+        self.portf_lbl = ttk.Label(money, text="—", style="Money.TLabel")
+        self.portf_lbl.grid(row=1, column=0, padx=(20, 0), sticky="w")
+        self.cash_lbl = ttk.Label(money, text="—", style="Cash.TLabel")
+        self.cash_lbl.grid(row=1, column=1, padx=(20, 0), sticky="w")
+        self.spend_lbl = ttk.Label(money, text="$0.00", style="Stat.TLabel")
+        self.spend_lbl.grid(row=1, column=2, padx=(20, 0), sticky="w")
 
         # ── лимиты ──
         lf = ttk.Labelframe(root, text="  ЛИМИТЫ И СТАВКА  ", padding=12)
@@ -435,7 +459,7 @@ class App(tk.Tk):
         try:
             if STATE.exists():
                 s = json.loads(STATE.read_text(encoding="utf-8"))
-                self.spend_lbl.config(text=f"сегодня потрачено: ${s.get('spent_day', 0):.2f}")
+                self.spend_lbl.config(text=f"${s.get('spent_day', 0):.2f}")
         except Exception:  # noqa: BLE001
             pass
         self.after(3000, self._refresh_status)
@@ -443,6 +467,43 @@ class App(tk.Tk):
     def _set_dot(self, color, text):
         self.dot.itemconfig(self._dot_id, fill=color)
         self.stat_lbl.config(text=text)
+
+    # ───────────────────── баланс Polymarket (портфель + наличные) ─────────────────────
+    def _poll_account(self):
+        threading.Thread(target=self._account_work, daemon=True).start()
+        self.after(45000, self._poll_account)      # раз в 45с (баланс меняется небыстро, вежливо к API)
+
+    def _account_work(self):
+        cfg = read_env()
+        funder = (cfg.get("FUNDER") or "").strip()
+        pk = (cfg.get("PRIVATE_KEY") or "").strip()
+        pos = positions_value(funder)              # позиции — без ключа (data-api)
+        cash = None
+        if pk and funder:                          # наличные — по ключу, ЛОКАЛЬНО (как сайт Polymarket)
+            try:
+                c = self._get_client(pk, funder)
+                if c is not None:
+                    ba = c.get_balance_allowance(asset_type="COLLATERAL")
+                    cash = int(getattr(ba, "balance", 0)) / 1e6
+            except Exception:  # noqa: BLE001
+                cash = None
+        self.after(0, lambda: self._set_account(pos, cash))
+
+    def _get_client(self, pk, funder):
+        """Ленивая инициализация SDK-клиента для чтения баланса. Ключ НЕ покидает машину."""
+        if self._client is not None:
+            return self._client
+        try:
+            from polymarket import SecureClient
+            self._client = SecureClient.create(private_key=pk, wallet=funder)
+        except Exception:  # noqa: BLE001
+            self._client = None
+        return self._client
+
+    def _set_account(self, pos, cash):
+        total = (pos or 0) + (cash or 0) if (pos is not None or cash is not None) else None
+        self.portf_lbl.config(text=f"${total:.2f}" if total is not None else "—")
+        self.cash_lbl.config(text=f"${cash:.2f}" if cash is not None else "—")
 
     # ───────────────────── сервер / кошельки ─────────────────────
     def _server(self):
@@ -564,6 +625,11 @@ class App(tk.Tk):
                 "Бот работает", "Бот ещё запущен. Остановить и выйти?"):
             return
         self.stop_bot()
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:  # noqa: BLE001
+                pass
         self.destroy()
 
 
