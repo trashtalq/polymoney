@@ -49,6 +49,29 @@ MAX_ADVERSE_MOVE = 0.06  # цена ушла от входа цели дальш
 # но по рыночной цене + слиппедж (реалистично). Адреса в lower-case.
 NO_FILTER_WALLETS = {"0xdacf9f8d0341fa3770fae5c7ccd9dcfed23e3c74"}
 
+# Пер-кошельковое ОТКЛЮЧЕНИЕ отдельных фильтров (wallet_filters.json): {wallet: ["band","avg_up",...]}.
+# Имена: band (цена у края), adverse (догон от цели), avg_up (усреднение вверх), cap (потолок
+# позиции), sport, weather. Что в списке — для этого кошелька фильтр ВЫКЛЮЧЕН.
+FILTER_NAMES = ("band", "adverse", "avg_up", "cap", "sport", "weather")
+_WFILT = {"mtime": -1, "map": {}}
+
+
+def _wallet_filters(wallet: str) -> set:
+    """Множество ОТКЛЮЧЁННЫХ фильтров для кошелька (перечитывается при изменении файла)."""
+    p = Path("wallet_filters.json")
+    try:
+        m = p.stat().st_mtime if p.exists() else 0
+        if m != _WFILT["mtime"]:
+            d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+            _WFILT["map"] = {k.lower(): set(v or []) for k, v in d.items()}
+            _WFILT["mtime"] = m
+    except Exception:  # noqa: BLE001
+        pass
+    off = set(_WFILT["map"].get((wallet or "").lower(), set()))
+    if (wallet or "").lower() in NO_FILTER_WALLETS:   # легаси-полное-отключение EV-фильтров
+        off |= {"band", "adverse", "avg_up"}
+    return off
+
 # НЕ копируем ставки на футбол/спорт (даже у оставленных кошельков) — спорт дорого копировать.
 SPORT_MARKET_KW = (
     "vs.", " vs ", "o/u", "over/under", "exact score", "both teams to score",
@@ -701,15 +724,16 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
     _th[_k] = _th.get(_k, 0.0) + _f(e, "size")
     if book.get("paused"):                              # ⏸ копирование остановлено кнопкой: новые входы
         return False                                    # не берём; выходы/резолвы/оценка работают дальше
-    _br = _blocked_reason(ev_title(e))                  # не копируем футбол/спорт/погоду (даже у no-filter)
-    if _br:
+    off = _wallet_filters(wallet)                       # ОТКЛЮЧЁННЫЕ для этого кошелька фильтры
+    _br = _blocked_reason(ev_title(e))                  # футбол/спорт/погода (можно отключить пер-кошельку)
+    if _br and _br not in off:
         return _record_skip(book, e, base, _br, per_trade, slippage, wallet)
-    nf = (wallet or "").lower() in NO_FILTER_WALLETS   # персональное отключение EV-фильтра
-    # --- фильтр копируемости: пропускаем сделки с разрушенным EV (кроме no-filter кошельков) ---
+    # --- фильтр копируемости: пропускаем сделки с разрушенным EV (если фильтр не отключён) ---
     their = ev_price(e)
-    if not nf:
+    if "band" not in off:
         if not (MIN_ENTRY_PRICE <= base <= MAX_ENTRY_PRICE):
             return _record_skip(book, e, base, "band", per_trade, slippage, wallet)
+    if "adverse" not in off:
         if 0 < their < 1 and (base - their) > MAX_ADVERSE_MOVE:
             return _record_skip(book, e, base, "adverse", per_trade, slippage, wallet)
     px = min(0.999, base + slippage)
@@ -726,13 +750,15 @@ def copy_buy(book: dict, e: dict, per_trade: float, slippage: float, cur=None, w
     key = f"{wallet}|{tok}"                           # позиции РАЗДЕЛЬНО по кошелькам
     pos = book["positions"].get(key)
     invested = pos["cost"] if pos else 0.0
-    if pos and not nf:                               # усреднение: повторяем, если логично (no-filter — всегда)
+    if pos and "avg_up" not in off:                  # усреднение: повторяем, если логично (иначе всегда)
         avg = pos["cost"] / pos["qty"] if pos["qty"] > 0 else px
         if px > avg + AVG_UP_TOL:
             return _record_skip(book, e, base, "avg_up", per_trade, slippage, wallet)
     room = per_trade * MAX_POSITION_MULT - invested  # общий потолок позиции (один вход всё равно <= per_trade)
-    if room < per_trade * MIN_BET_FRAC:
+    if "cap" not in off and room < per_trade * MIN_BET_FRAC:
         return _record_skip(book, e, base, "cap", per_trade, slippage, wallet)
+    if "cap" in off and room < per_trade * MIN_BET_FRAC:
+        room = per_trade                             # cap отключён -> позволяем ещё один вход поверх потолка
     spend = min(want, room)                           # размер как прежде — кэш НЕ ограничивает (бумага)
     if spend < per_trade * MIN_BET_FRAC:
         return False                                 # нет места под потолком позиции

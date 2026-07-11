@@ -470,6 +470,15 @@ PAGE = r"""<!doctype html>
   .tog.on{color:var(--green)} .tog.on:hover{background:rgba(43,245,176,.2)}
   tr.wpaused{opacity:.5} tr.wpaused:hover{opacity:.8}
   tr.wpaused td:first-child{box-shadow:inset 3px 0 0 var(--amber)}
+  .fltrow{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 4px}
+  .flt{cursor:pointer;padding:6px 12px;border-radius:9px;font-size:12px;user-select:none;
+       border:1px solid var(--border);transition:all .12s;display:flex;align-items:center;gap:7px}
+  .flt .sw{width:26px;height:15px;border-radius:9px;background:#2a3a4a;position:relative;transition:all .15s;flex:none}
+  .flt .sw::after{content:"";position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:#7a94a4;transition:all .15s}
+  .flt.on{color:var(--green);border-color:rgba(43,245,176,.4)}
+  .flt.on .sw{background:rgba(43,245,176,.35)} .flt.on .sw::after{left:13px;background:var(--green)}
+  .flt.off{color:var(--muted)}
+  .flt:hover{border-color:var(--border2)}
   .tabs{display:flex;gap:8px;margin:16px 0 2px}
   .tab{cursor:pointer;font:inherit;font-size:12px;font-weight:800;letter-spacing:1.2px;
        text-transform:uppercase;color:var(--muted);background:rgba(10,18,30,.55);
@@ -698,6 +707,8 @@ PAGE = r"""<!doctype html>
       <b id="wtitle">Кошелёк</b>
       <span class="x" onclick="closeWallet()">✕</span>
     </div>
+    <div class="sec" style="margin:12px 0 8px">Фильтры копи — вкл/выкл для этого кошелька</div>
+    <div class="fltrow" id="wfilters"></div>
     <div class="sec" style="margin:12px 0 8px">Сводка — реально скопировано</div>
     <div class="skipsum" id="wsum"></div>
     <div class="sec" style="margin:16px 0 8px">Теневые (отсеяны фильтром EV, нотионал $10)</div>
@@ -778,6 +789,10 @@ async function moveWallet(a){
 async function toggleWalletPause(a,paused){
   const r=await _adminPost("/api/wallet_pause",{wallet:a,paused:paused});
   if(r&&r.ok) tick(); else if(r) alert("Не удалось: "+(r.error||""));
+}
+async function toggleFilter(a,f,enabled){
+  const r=await _adminPost("/api/wallet_filters",{wallet:a,filter:f,enabled:enabled});
+  if(r&&r.ok) loadWallet(); else if(r) alert("Не удалось: "+(r.error||""));
 }
 async function loadReal(){
   let d; try{ d=await (await fetch("/api/real")).json(); }catch(e){ return; }
@@ -877,6 +892,11 @@ async function loadWallet(){
   let d; try{ d=await (await fetch("/api/wallet?addr="+curWallet+qsa())).json(); }catch(e){ return; }
   $("wtitle").innerHTML = shortAddr(d.wallet)+' &nbsp;<span class="rtag">'+(d.source||"—")+'</span> '+
     '&nbsp;<a class="addr" href="https://polymarket.com/profile/'+d.wallet+'" target="_blank">профиль ↗</a>';
+  const FLBL={band:"цена у края",adverse:"догон от цели",avg_up:"усреднение вверх",cap:"потолок позиции",sport:"спорт",weather:"погода"};
+  const foff=new Set(d.filters_off||[]);
+  $("wfilters").innerHTML=(d.filters||[]).map(f=>{const on=!foff.has(f);
+    return '<span class="flt '+(on?"on":"off")+'" title="'+(on?"фильтр включён — режет такие сделки":"выключен — такие сделки копируются")+'" onclick="toggleFilter(\''+d.wallet+'\',\''+f+'\','+(on?"false":"true")+')"><span class="sw"></span>'+(FLBL[f]||f)+'</span>';
+  }).join("");
   $("wsum").innerHTML = [
     ["Скопировано BUY", d.n_buys, ""],
     ["Задействовано", money(d.spent), ""],
@@ -1341,6 +1361,8 @@ def api_wallet():
                                "real": round(sh["real"], 2), "open": round(sh["open"], 2),
                                "total": round(sh["real"] + sh["open"], 2)},
                     "n_closed": len(closed),
+                    "filters": list(ct.FILTER_NAMES),           # все фильтры (для UI-тумблеров)
+                    "filters_off": sorted(ct._wallet_filters(addr)),  # какие ВЫКЛЮЧЕНЫ для кошелька
                     "positions": positions, "closed": closed[:80], "log": log,
                     "shadow_rows": shadow_rows[:120]})
 
@@ -1500,6 +1522,33 @@ def api_wallet_pause():
         cur.discard(addr)
     p.write_text(json.dumps(sorted(cur), ensure_ascii=False, indent=1), encoding="utf-8")
     return jsonify({"ok": True, "wallet": addr, "paused": bool(data.get("paused")), "n_paused": len(cur)})
+
+
+@app.route("/api/wallet_filters", methods=["POST"])
+def api_wallet_filters():
+    """Вкл/выкл ОДИН фильтр для ОДНОГО кошелька (пароль в теле):
+    {pw, wallet, filter: band|adverse|avg_up|cap|sport|weather, enabled: true|false}.
+    enabled=false -> фильтр для этого кошелька выключен (сделки, которые он резал, копируются)."""
+    data = request.get_json(silent=True) or {}
+    if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
+        return jsonify({"ok": False, "error": "auth"}), 401
+    addr = (data.get("wallet", "") or "").lower()
+    filt = (data.get("filter", "") or "").lower()
+    if not (addr.startswith("0x") and len(addr) == 42) or filt not in ct.FILTER_NAMES:
+        return jsonify({"ok": False, "error": "bad wallet/filter"}), 400
+    p = Path("wallet_filters.json")
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except Exception:  # noqa: BLE001
+        cfg = {}
+    off = set(cfg.get(addr, []))
+    off.discard(filt) if data.get("enabled") else off.add(filt)
+    if off:
+        cfg[addr] = sorted(off)
+    else:
+        cfg.pop(addr, None)
+    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), encoding="utf-8")
+    return jsonify({"ok": True, "wallet": addr, "off": sorted(off)})
 
 
 @app.route("/api/set_source", methods=["POST"])
