@@ -2097,18 +2097,25 @@ def api_renorm():
 
 @app.route("/api/purge_blocked", methods=["POST"])
 def api_purge_blocked():
-    """Пересчитать книгу как будто футбол/погода никогда не копировались (пароль в теле)."""
+    """Пересчитать ВСЕ книги (main + core + кастомные группы) как будто заблокированные
+    рынки (спорт/погода/твит-каунт) никогда не копировались (пароль в теле)."""
     data = request.get_json(silent=True) or {}
     if hashlib.sha256((data.get("pw", "") or "").encode("utf-8")).hexdigest() != ADMIN_HASH:
         return jsonify({"ok": False, "error": "auth"}), 401
+    purged = {}
     with _lock:
-        res = ct.purge_blocked(STATE["book"])
-        STATE["book_ver"] += 1          # инвалидирует снимок, который мог снять poll_loop до этого
-        try:
-            ct.save_book(STATE.get("state_file", "paper_book.json"), STATE["book"])
-        except Exception:  # noqa: BLE001
-            pass
-    return jsonify({"ok": True, **res})
+        for g in ["main", "core"] + [x["id"] for x in _groups_registry()]:
+            bk, _mk, _st, ver, sf = _slot(g)
+            book = STATE.get(bk)
+            if book is None:
+                continue
+            purged[g] = ct.purge_blocked(book)
+            STATE[ver] += 1             # инвалидирует снимок, который мог снять poll_loop до этого
+            try:
+                ct.save_book(STATE.get(sf) or "paper_book.json", book)
+            except Exception:  # noqa: BLE001
+                pass
+    return jsonify({"ok": True, "purged": purged})
 
 
 # ----------------------------- отчёт для прополки -----------------------------
