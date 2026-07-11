@@ -56,21 +56,59 @@ STATE = {
 
 
 def _slot(g: str):
-    """Ключи STATE для группы: 'core' -> core-книга, иначе основная."""
+    """Ключи STATE для группы: '' /main -> основная, core -> core-книга, иначе кастомная (book_<id>…)."""
     if g == "core":
         return "core_book", "core_marks", "core_status", "core_book_ver", "core_state_file"
+    if g and g != "main":
+        return f"book_{g}", f"marks_{g}", f"status_{g}", f"book_ver_{g}", f"state_file_{g}"
     return "book", "marks", "status", "book_ver", "state_file"
 
 
-def _core_wallets() -> list:
-    """Состав core-группы: кошельки с ярлыком core-реал (и всё ещё в watchlist).
-    Перечитывается каждый цикл -> смена ярлыка меняет группу без рестарта."""
+def _group_wallets(label: str) -> list:
+    """Кошельки группы = с ярлыком source==label и ещё в watchlist. Перечитывается каждый цикл."""
     try:
         srcs = get_sources()
         wl = get_watchlist()
-        return [w for w, lbl in srcs.items() if lbl == "core-реал" and (not wl or w in wl)]
+        return [w for w, lbl in srcs.items() if lbl == label and (not wl or w in wl)]
     except Exception:  # noqa: BLE001
         return []
+
+
+def _core_wallets() -> list:
+    return _group_wallets("core-реал")
+
+
+# ----------------------------- реестр динамических групп -----------------------------
+def _groups_registry() -> list:
+    """Кастомные группы (groups.json): [{id,name,label,bankroll,hard_cash}]. main/core — встроенные."""
+    p = Path("groups.json")
+    try:
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _start_group(gid: str, label: str, bankroll: float, hard_cash: bool):
+    """Поднять кастомную группу: своя книга + слоты STATE + опросный поток (как core, но по label)."""
+    bk, mk_, stt, ver, sf = _slot(gid)
+    state_file = f"book_{gid}.json"
+    book = ct.load_book(state_file, bankroll)
+    if hard_cash:
+        book["hard_cash"] = True
+    STATE[bk] = book
+    STATE[mk_] = {}
+    STATE[stt] = {"started_at": int(time.time()), "last_poll": 0, "polling": False,
+                  "error": "", "n_polls": 0, "wallets": 0}
+    STATE[ver] = 0
+    STATE[sf] = state_file
+    STATE.pop(f"stop_{gid}", None)
+    cfg = STATE.get("cfg", {})
+    import threading as _th
+    _th.Thread(target=poll_loop,
+               args=(ct.API(), _group_wallets(label), cfg.get("per_trade", 10),
+                     cfg.get("slippage", 0.01), max(30, cfg.get("interval", 120) // 2),
+                     state_file, None, gid, label),
+               daemon=True).start()
 
 
 # ----------------------------- пер-кошельковая пауза копи -----------------------------
@@ -338,14 +376,18 @@ def _reload_wallets(wl_path, fallback):
         return fallback
 
 
-def poll_loop(api, wallets, per_trade, slippage, interval, state_file, wl_path=None, g="main"):
+def poll_loop(api, wallets, per_trade, slippage, interval, state_file, wl_path=None, g="main",
+              label=None):
     bk, mk_, stt, ver, _sf = _slot(g)
     while True:
         try:
-            if g == "core":
-                wallets = _core_wallets() or wallets        # группа = ярлык core-реал (горячо)
-            else:
-                wallets = _reload_wallets(wl_path, wallets)  # перечитываем список целей каждый цикл
+            if STATE.get(f"stop_{g}"):                       # группу удалили -> завершаем поток
+                print(f"[{g}] группа остановлена", flush=True)
+                return
+            if g == "main":
+                wallets = _reload_wallets(wl_path, wallets)  # общая: весь watchlist (горячо)
+            else:                                            # core/кастомная: кошельки по ярлыку label
+                wallets = _group_wallets(label or "core-реал") or wallets
             paused = _paused_wallets()                       # пер-кошельковая пауза: не копируем их входы
             if paused:
                 wallets = [w for w in wallets if w.lower() not in paused]
@@ -529,7 +571,11 @@ PAGE = r"""<!doctype html>
        text-shadow:0 0 10px rgba(6,229,255,.35)}
   .sec::before{content:"";width:16px;height:3px;border-radius:2px;flex:none;
        background:linear-gradient(90deg,var(--accent),transparent);box-shadow:0 0 8px var(--accent)}
-  .sec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,rgba(6,229,255,.22),transparent)}
+  .sec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,rgba(6,229,255,.22),transparent);order:1}
+  .sec.csec{cursor:pointer;user-select:none}
+  .sec .chev{order:2;flex:none;font-size:13px;line-height:1;color:var(--accent);opacity:.8;transition:transform .18s}
+  .sec.secclosed .chev{transform:rotate(-90deg)}
+  .sec.csec:hover .chev{opacity:1}
   .tblwrap{border:1px solid var(--border);border-radius:14px;overflow:auto;
        background:linear-gradient(180deg,rgba(14,23,38,.78),rgba(9,15,26,.85));
        box-shadow:0 10px 28px rgba(0,0,0,.3)}
@@ -643,10 +689,11 @@ PAGE = r"""<!doctype html>
 
   <div class="cards" id="cards"></div>
 
-  <div class="sec">Кривая PnL</div>
+  <div class="sec csec" data-k="spark" onclick="toggleSec(this)">Кривая PnL <span class="chev">▾</span></div>
   <div class="spark"><svg id="spark" width="100%" height="132" preserveAspectRatio="none"></svg></div>
 
-  <div class="sec">По кошелькам — авто-ранжирование по форвардному PnL</div>
+  <div class="sec csec" data-k="wallets" onclick="toggleSec(this)">По кошелькам — авто-ранжирование по форвардному PnL <span class="chev">▾</span></div>
+  <div class="secbody">
   <div class="mgmt">
     <input id="addAddr" class="inp" placeholder="0x… адрес кошелька" maxlength="42" spellcheck="false">
     <input id="addList" class="inp" list="listnames" placeholder="список (напр. политика)" style="width:170px">
@@ -661,8 +708,9 @@ PAGE = r"""<!doctype html>
     <tbody id="wallets"></tbody>
   </table>
   </div>
+  </div>
 
-  <div class="sec">Открытые позиции — все</div>
+  <div class="sec csec" data-k="open" onclick="toggleSec(this)">Открытые позиции — все <span class="chev">▾</span></div>
   <div class="tblwrap">
   <table>
     <thead><tr><th>Кошелёк</th><th>Рынок</th><th>Ставка</th><th>Вход</th><th>Тек. кэф</th><th>Вложено</th><th>Оценка</th><th>P/L</th></tr></thead>
@@ -670,7 +718,7 @@ PAGE = r"""<!doctype html>
   </table>
   </div>
 
-  <div class="sec">Последние действия</div>
+  <div class="sec csec" data-k="log" onclick="toggleSec(this)">Последние действия <span class="chev">▾</span></div>
   <div class="tblwrap">
   <table>
     <thead><tr><th>Время</th><th>Кошелёк</th><th>Действие</th><th>Ставка</th><th>Рынок</th><th>PnL / сумма</th></tr></thead>
@@ -737,6 +785,22 @@ PAGE = r"""<!doctype html>
 
 <script>
 const $ = id => document.getElementById(id);
+// --- сворачивание секций (открытые/лог/кошельки/кривая) — состояние в localStorage ---
+function _secState(){ try{ return JSON.parse(localStorage.getItem("secs")||"{}"); }catch(e){ return {}; } }
+function toggleSec(el){
+  const body=el.nextElementSibling, key=el.dataset.k;
+  const closed=el.classList.toggle("secclosed");
+  if(body) body.style.display = closed ? "none" : "";
+  const s=_secState(); s[key]=closed; localStorage.setItem("secs",JSON.stringify(s));
+}
+function applySecs(){
+  const s=_secState();
+  document.querySelectorAll(".sec.csec").forEach(el=>{
+    const closed=!!s[el.dataset.k], body=el.nextElementSibling;
+    el.classList.toggle("secclosed", closed);
+    if(body) body.style.display = closed ? "none" : "";
+  });
+}
 // --- группы: main (общая, с доливами) / core (когорта core-реал, жёсткий депозит) ---
 let G = localStorage.getItem("grp") || "main";
 const qs  = () => G==="core" ? "?g=core" : "";
@@ -1178,7 +1242,7 @@ async function loadSkipped(){
       '<td>'+spc+'</td></tr>';
   }).join("") || '<tr><td colspan="9" class="empty">отфильтрованных сделок пока нет</td></tr>';
 }
-paintTabs(); tick(); loadLists(); setInterval(tick, 10000); setInterval(loadLists, 30000);
+paintTabs(); applySecs(); tick(); loadLists(); setInterval(tick, 10000); setInterval(loadLists, 30000);
 setInterval(()=>{ if(skipOpen) loadSkipped(); }, 10000);
 setInterval(()=>{ if(curWallet) loadWallet(); }, 10000);
 </script>
