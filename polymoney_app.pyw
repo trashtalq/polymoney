@@ -134,6 +134,36 @@ def positions_value(funder: str):
         return None
 
 
+def real_pnl_by_wallet(funder: str):
+    """PnL по кошелькам ИЗ ТВОЕЙ РЕАЛЬНОЙ торговли (а не бумага с сервера): привязка токен->кошелёк
+    (state['tok_wallet'] из live_exec_state.json) x реальные позиции счёта с чейна (data-api).
+    -> {wallet_lower: {"pnl":$, "inv":$, "n":позиций}}. Учитывает позиции, что бот открыл ПОСЛЕ
+    появления привязки; реализованные после выкупа исчезают с чейна."""
+    tw = {}
+    try:
+        st = json.loads(STATE.read_text(encoding="utf-8"))
+        tw = {str(t): (w or "").lower() for t, w in (st.get("tok_wallet") or {}).items()}
+    except Exception:  # noqa: BLE001
+        pass
+    if not funder or requests is None or not tw:
+        return {}
+    try:
+        pos = requests.get(f"https://data-api.polymarket.com/positions?user={funder}&limit=500",
+                           timeout=12).json()
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for p in pos if isinstance(pos, list) else []:
+        w = tw.get(str(p.get("asset") or ""))
+        if not w:
+            continue
+        o = out.setdefault(w, {"pnl": 0.0, "inv": 0.0, "n": 0})
+        o["pnl"] += float(p.get("cashPnl") or 0)
+        o["inv"] += float(p.get("initialValue") or 0)
+        o["n"] += 1
+    return out
+
+
 # ───────────────────────────────── приложение ────────────────────────────────
 class App(tk.Tk):
     def __init__(self):
@@ -281,7 +311,7 @@ class App(tk.Tk):
         cols = ("addr", "src", "copy", "pnl")
         self.tree = ttk.Treeview(wf, columns=cols, show="headings", height=8, selectmode="browse")
         for c, txt, w in (("addr", "Кошелёк", 120), ("src", "Список", 90),
-                          ("copy", "Копи", 60), ("pnl", "PnL $", 70)):
+                          ("copy", "Копи", 60), ("pnl", "Мой PnL $", 80)):
             self.tree.heading(c, text=txt)
             self.tree.column(c, width=w, anchor="w" if c in ("addr", "src") else "center")
         self.tree.grid(row=1, column=0, sticky="nsew")
@@ -565,17 +595,19 @@ class App(tk.Tk):
                 messagebox.showerror("Сервер недоступен", str(ex))
             return
         rows = r.get("per_wallet", []) or []
+        real = real_pnl_by_wallet((read_env().get("FUNDER") or "").strip())   # ТВОЙ реальный PnL
         self.tree.delete(*self.tree.get_children())
         self.wallet_rows.clear()
         for w in rows:
             addr = w.get("wallet", "")
             paused = bool(w.get("copy_paused"))
             short = addr[:6] + "…" + addr[-4:] if len(addr) > 12 else addr
+            rw = real.get(addr.lower())            # реальный PnL по этому кошельку (или прочерк)
+            pnl_txt = f"{rw['pnl']:+.2f}" if rw else "—"
             iid = self.tree.insert(
                 "", "end", tags=("off" if paused else "on"),
                 values=(short, w.get("source", "—"),
-                        "пауза" if paused else "✓",
-                        f"{w.get('total', 0):+.0f}"))
+                        "пауза" if paused else "✓", pnl_txt))
             self.wallet_rows[iid] = {"addr": addr, "paused": paused}
 
     def _selected(self):
