@@ -1017,7 +1017,7 @@ async function openWallet(a){ curWallet=a; $("wmodal").classList.add("show"); aw
 async function loadWallet(){
   if(!curWallet) return;
   let d; try{ d=await (await fetch("/api/wallet?addr="+curWallet+qsa())).json(); }catch(e){ return; }
-  $("wtitle").innerHTML = shortAddr(d.wallet)+' &nbsp;<span class="rtag">'+(d.source||"—")+'</span> '+
+  $("wtitle").innerHTML = '<span class="addr" style="user-select:all">'+d.wallet+'</span> &nbsp;<span class="rtag">'+(d.source||"—")+'</span> '+
     '&nbsp;<a class="addr" href="https://polymarket.com/profile/'+d.wallet+'" target="_blank">профиль ↗</a>';
   const FLBL={band:"цена у края",adverse:"догон от цели",avg_up:"усреднение вверх",cap:"потолок позиции",sport:"спорт",weather:"погода"};
   const foff=new Set(d.filters_off||[]);
