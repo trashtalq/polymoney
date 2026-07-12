@@ -174,12 +174,27 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     seed_allowlist(s, server, group)                  # белый список из текущего ядра, если ещё нет
     state = st_load()
-    state.setdefault("spent_by_wallet", {})           # адрес цели -> $ потрачено за день (лимит на кошелёк)
+    state.setdefault("spent_by_wallet", {})           # адрес цели -> $ потрачено за день (fallback для dry)
+    state.setdefault("tok_wallet", {})                # токен -> кошелёк-источник (для лимита экспозиции)
     session_add = {}          # tok -> $ добавлено ЭТИМ процессом (страхует settle-лаг чейна)
     held = {}                 # tok -> $ реально вложено с кошелька (обновляется каждый цикл)
     smoke_done = False
     primed = False                                    # форвард на КАЖДОМ запуске, не только первом
     cap_usd = max_entries * per_trade                 # потолок $ на одну позу (напр. 2×$1=$2)
+
+    def wallet_exposure(w):
+        """Текущая экспозиция бота по кошельку w = сумма НАШИХ ЖИВЫХ позиций, скопированных с него
+        (по чейну held + входы этого цикла), через карту токен->источник. Закрылась позиция (в плюс
+        ИЛИ в минус) — токен уходит из held -> экспозиция сама падает, лимит на кошелёк освобождается."""
+        tw = state["tok_wallet"]
+        e = 0.0
+        for t, v in held.items():
+            if tw.get(t) == w:
+                e += v.get("usd", 0.0)
+        for t, a in session_add.items():
+            if tw.get(t) == w:
+                e += a
+        return e
 
     while True:
         try:
@@ -260,12 +275,18 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                       flush=True)
                 state["done"].append(k)
                 continue
-            wsp = state["spent_by_wallet"].get(sig.get("w", ""), 0.0)   # лимит трат на ОДИН кошелёк/день
-            if max_per_wallet and wsp + per_trade > max_per_wallet + 1e-6:
-                print(f"  skip (кошелёк {sig.get('w','')[:8]}… уже ${wsp:.0f}/день, лимит "
-                      f"${max_per_wallet:.0f} — не даём частильщику съесть бюджет): {title}", flush=True)
-                state["done"].append(k)
-                continue
+            # ЛИМИТ НА КОШЕЛЁК = сумма его ТЕКУЩИХ открытых позиций (не расход за сутки). Частильщик
+            # входит снова, ТОЛЬКО когда его прошлые позиции закрылись (в плюс/минус — неважно, held
+            # упал). При funder считаем по реальной экспозиции; без funder (dry) — старый дневной счётчик.
+            sig_w = (sig.get("w", "") or "")
+            if max_per_wallet:
+                wexp = wallet_exposure(sig_w) if funder else state["spent_by_wallet"].get(sig_w, 0.0)
+                if wexp + per_trade > max_per_wallet + 1e-6:
+                    unit = "в позах" if funder else "за день"
+                    print(f"  skip (с кошелька {sig_w[:8]}… {unit} уже ~${wexp:.2f}, лимит "
+                          f"${max_per_wallet:.0f} — ждём закрытия его позиций): {title}", flush=True)
+                    state["done"].append(k)
+                    continue
             # ЛИМИТ ДЕПОЗИТА = деньги В ОТКРЫТЫХ ПОЗИЦИЯХ СЕЙЧАС, не пожизненный расход. Когда
             # позиция закрывается/продаётся — бюджет освобождается сам (held падает). Считаем по
             # реальным холдингам с чейна (funder) + входы этого цикла. Без funder — старый счётчик.
@@ -285,7 +306,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             if mode == "dry":
                 print(f"  [DRY] купил бы: {line}", flush=True)
                 session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade  # dry-превью лимитов
-                state["spent_by_wallet"][sig.get("w", "")] = wsp + per_trade
+                state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + per_trade
+                state["tok_wallet"].setdefault(sig["tok"], sig_w)   # токен -> источник (первый закрепляет)
                 state["done"].append(k)
                 continue
 
@@ -310,7 +332,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 if ok:
                     state["done"].append(k)
                     session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade
-                    state["spent_by_wallet"][sig.get("w", "")] = wsp + per_trade
+                    state["tok_wallet"].setdefault(sig["tok"], sig_w)   # токен -> источник (для лимита)
+                    state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + per_trade
                     state["spent_total"] = round(state["spent_total"] + per_trade, 2)
                     state["spent_day"] = round(state["spent_day"] + per_trade, 2)
                     smoke_done = True
@@ -371,6 +394,9 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
 
         if len(state["done"]) > 4000:                # держим список исполненного компактным
             state["done"] = state["done"][-2000:]
+        # карту токен->кошелёк чистим от закрытых позиций (их экспозиция уже освободилась)
+        state["tok_wallet"] = {t: w for t, w in state["tok_wallet"].items()
+                               if t in held or t in session_add}
         st_save(state)
         time.sleep(poll)
 
