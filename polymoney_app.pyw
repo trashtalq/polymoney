@@ -151,6 +151,7 @@ class App(tk.Tk):
         self._tok_wallet = {}      # токен->кошелёк из локальных тегов бота (дополнение к привязке)
         self._style()
         self._build()
+        self._enable_clipboard()       # Ctrl+V/C/X/A при ЛЮБОЙ раскладке (в т.ч. русской)
         self._load_into_fields()
         self.after(200, self._pump)
         self.after(500, self._refresh_status)
@@ -202,6 +203,25 @@ class App(tk.Tk):
                      borderwidth=0, font=("Segoe UI", 9, "bold"))
         st.map("Treeview", background=[("selected", "#173049")],
                foreground=[("selected", ACC)])
+
+    # ── буфер обмена по КЕЙКОДУ (работает при русской раскладке, где Ctrl+V = Ctrl+«м») ──
+    def _enable_clipboard(self):
+        def clip(event):
+            kc = event.keycode
+            w = event.widget
+            try:
+                if kc == 86:                      # V — вставка
+                    w.event_generate("<<Paste>>"); return "break"
+                if kc == 67:                      # C — копировать
+                    w.event_generate("<<Copy>>"); return "break"
+                if kc == 88:                      # X — вырезать
+                    w.event_generate("<<Cut>>"); return "break"
+                if kc == 65:                      # A — выделить всё
+                    w.select_range(0, "end"); w.icursor("end"); return "break"
+            except Exception:  # noqa: BLE001
+                pass
+        for cls in ("TEntry", "Entry", "Text"):
+            self.bind_class(cls, "<Control-KeyPress>", clip)
 
     # ── разметка ──
     def _build(self):
