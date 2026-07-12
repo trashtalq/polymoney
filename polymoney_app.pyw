@@ -649,11 +649,14 @@ class App(tk.Tk):
         pw = self._pw()
         if not pw:
             return
-        r = self._api_post("/api/add_wallet", {"pw": pw, "wallets": [addr], "source": CORE_LABEL})
+        r = self._api_post("/api/add_wallet",
+                           {"pw": pw, "wallets": [addr], "source": CORE_LABEL, "relabel": True})
         if r and r.get("ok"):
             allow_update(add=addr)                 # синхроним локальный allowlist бота
             self.addr_var.set("")
-            self._log_raw(f"➕ Добавлен в копи (и в allowlist): {addr[:10]}…", "green")
+            moved = "перенесён в core-реал" if r.get("relabeled") else (
+                "добавлен" if r.get("added") else "уже в core")
+            self._log_raw(f"➕ {moved} (+ allowlist): {addr[:10]}…", "green")
             self.refresh_wallets()
         elif r:
             messagebox.showerror("Не добавилось", str(r.get("error", r)))

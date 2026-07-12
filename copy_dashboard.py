@@ -2095,7 +2095,12 @@ def api_add_wallet():
     d["count"] = len(d["watchlist"])
     path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
     label = (data.get("source") or "добавлен-вручную")[:40]
-    for w in new:
+    # relabel=true -> ПЕРЕНОС уже существующих в этот список (смена ярлыка), напр. main -> core-реал.
+    # Без флага дупы НЕ трогаем — иначе пуш сканера мог бы случайно перекинуть кошелёк из ядра.
+    relabel = [w for w in dict.fromkeys(ws)
+               if data.get("relabel") and w in have and (force or w not in deleted)
+               and srcs.get(w) != label] if data.get("relabel") else []
+    for w in new + relabel:
         srcs[w] = label
     try:
         sp.write_text(json.dumps(srcs, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2109,7 +2114,8 @@ def api_add_wallet():
                                    ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001
         pass
-    return jsonify({"ok": True, "added": len(new), "dup": sum(1 for w in ws if w in have),
+    return jsonify({"ok": True, "added": len(new), "relabeled": len(relabel),
+                    "dup": sum(1 for w in ws if w in have),
                     "skipped_deleted": sum(1 for w in set(ws) - have if w in deleted and not force),
                     "count": d["count"], "wallets_added": new})
 
