@@ -134,36 +134,6 @@ def positions_value(funder: str):
         return None
 
 
-def real_pnl_by_wallet(funder: str):
-    """PnL по кошелькам ИЗ ТВОЕЙ РЕАЛЬНОЙ торговли (а не бумага с сервера): привязка токен->кошелёк
-    (state['tok_wallet'] из live_exec_state.json) x реальные позиции счёта с чейна (data-api).
-    -> {wallet_lower: {"pnl":$, "inv":$, "n":позиций}}. Учитывает позиции, что бот открыл ПОСЛЕ
-    появления привязки; реализованные после выкупа исчезают с чейна."""
-    tw = {}
-    try:
-        st = json.loads(STATE.read_text(encoding="utf-8"))
-        tw = {str(t): (w or "").lower() for t, w in (st.get("tok_wallet") or {}).items()}
-    except Exception:  # noqa: BLE001
-        pass
-    if not funder or requests is None or not tw:
-        return {}
-    try:
-        pos = requests.get(f"https://data-api.polymarket.com/positions?user={funder}&limit=500",
-                           timeout=12).json()
-    except Exception:  # noqa: BLE001
-        return {}
-    out = {}
-    for p in pos if isinstance(pos, list) else []:
-        w = tw.get(str(p.get("asset") or ""))
-        if not w:
-            continue
-        o = out.setdefault(w, {"pnl": 0.0, "inv": 0.0, "n": 0})
-        o["pnl"] += float(p.get("cashPnl") or 0)
-        o["inv"] += float(p.get("initialValue") or 0)
-        o["n"] += 1
-    return out
-
-
 # ───────────────────────────────── приложение ────────────────────────────────
 class App(tk.Tk):
     def __init__(self):
@@ -176,6 +146,9 @@ class App(tk.Tk):
         self.q = queue.Queue()
         self.wallet_rows = {}      # iid -> {"addr":..., "paused":bool}
         self._client = None        # SDK-клиент для баланса (создаётся лениво по ключу, локально)
+        self._attr = {}            # (название,сторона)->кошелёк из истории копирования (кэш)
+        self._attr_ts = 0
+        self._tok_wallet = {}      # токен->кошелёк из локальных тегов бота (дополнение к привязке)
         self._style()
         self._build()
         self._load_into_fields()
@@ -588,27 +561,78 @@ class App(tk.Tk):
     def refresh_wallets(self, quiet=False):
         if requests is None:
             return
+        threading.Thread(target=self._wallets_work, args=(quiet,), daemon=True).start()
+
+    def _wallets_work(self, quiet):
+        srv = self._server()
         try:
-            r = requests.get(self._server() + "/api/state", params={"g": "core"}, timeout=20).json()
+            r = requests.get(srv + "/api/state", params={"g": "core"}, timeout=20).json()
         except Exception as ex:  # noqa: BLE001
             if not quiet:
-                messagebox.showerror("Сервер недоступен", str(ex))
+                self.after(0, lambda: messagebox.showerror("Сервер недоступен", str(ex)))
             return
         rows = r.get("per_wallet", []) or []
-        real = real_pnl_by_wallet((read_env().get("FUNDER") or "").strip())   # ТВОЙ реальный PnL
+        funder = (read_env().get("FUNDER") or "").strip()
+        real = self._real_pnl(srv, funder, [w.get("wallet", "") for w in rows])
+        self.after(0, lambda: self._render_wallets(rows, real))
+
+    def _render_wallets(self, rows, real):
         self.tree.delete(*self.tree.get_children())
         self.wallet_rows.clear()
         for w in rows:
             addr = w.get("wallet", "")
             paused = bool(w.get("copy_paused"))
             short = addr[:6] + "…" + addr[-4:] if len(addr) > 12 else addr
-            rw = real.get(addr.lower())            # реальный PnL по этому кошельку (или прочерк)
+            rw = real.get(addr.lower())            # ТВОЙ реальный PnL по кошельку (или прочерк)
             pnl_txt = f"{rw['pnl']:+.2f}" if rw else "—"
             iid = self.tree.insert(
                 "", "end", tags=("off" if paused else "on"),
                 values=(short, w.get("source", "—"),
                         "пауза" if paused else "✓", pnl_txt))
             self.wallet_rows[iid] = {"addr": addr, "paused": paused}
+
+    def _real_pnl(self, srv, funder, wallets):
+        """ТВОЙ реальный PnL по кошелькам: позиции счёта с чейна (cashPnl) x привязка «какой кошелёк
+        копировали». Привязка = карта (название,сторона)->кошелёк из серверных логов копирования
+        (кэш 5 мин) + локальные теги бота. PnL 100% реальный, покрытие ~ вся история копирования."""
+        if not funder or requests is None:
+            return {}
+        now = time.time()
+        if not self._attr or now - self._attr_ts > 300:      # строим карту привязки (кэш 5 мин)
+            amap = {}
+            for a in wallets:
+                try:
+                    d = requests.get(srv + "/api/wallet", params={"g": "core", "addr": a}, timeout=20).json()
+                except Exception:  # noqa: BLE001
+                    continue
+                for e in d.get("log", []):
+                    if e.get("act") != "BUY":
+                        continue
+                    key = ((e.get("title") or "").strip().lower()[:40], (e.get("out") or "").lower())
+                    amap.setdefault(key, a.lower())          # первый закрепляет (неоднозначных ~0)
+            # локальные теги токен->кошелёк как дополнение (для рынков без совпадения по названию)
+            try:
+                stt = json.loads(STATE.read_text(encoding="utf-8"))
+                self._tok_wallet = {str(t): (wv or "").lower() for t, wv in (stt.get("tok_wallet") or {}).items()}
+            except Exception:  # noqa: BLE001
+                self._tok_wallet = {}
+            self._attr, self._attr_ts = amap, now
+        try:
+            pos = requests.get(f"https://data-api.polymarket.com/positions?user={funder}&limit=500",
+                               timeout=15).json()
+        except Exception:  # noqa: BLE001
+            return {}
+        out = {}
+        for p in pos if isinstance(pos, list) else []:
+            key = ((p.get("title") or "").strip().lower()[:40], (p.get("outcome") or "").lower())
+            w = self._attr.get(key) or self._tok_wallet.get(str(p.get("asset") or ""))
+            if not w:
+                continue
+            o = out.setdefault(w, {"pnl": 0.0, "inv": 0.0, "n": 0})
+            o["pnl"] += float(p.get("cashPnl") or 0)
+            o["inv"] += float(p.get("initialValue") or 0)
+            o["n"] += 1
+        return out
 
     def _selected(self):
         sel = self.tree.selection()
