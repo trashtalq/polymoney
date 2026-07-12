@@ -114,11 +114,24 @@ def _is_tweet_count(t: str) -> bool:
     return bool(_TWEETCOUNT_RE.search(t))
 
 
+# КИБЕРСПОРТ — не копируем (решение пользователя 2026-07-12): лиги/турниры + счёт серий «win 2-0».
+ESPORTS_KW = (
+    "esports", "e-sports", " msi ", " msi?", "msi 2026", "msi 2027", " lpl", " lck",
+    " lec", " lcs", "dota", "the international", "valorant", "league of legends",
+    "counter-strike", "cs2", "cs:go", "mobile legends", "overwatch", " iem ",
+    "win 2-0", "win 2-1", "win 3-0", "win 3-1", "win 3-2", " map 1", " map 2", " map 3",
+)
+
+
 def _blocked_reason(title: str):
-    """Возвращает 'sport'/'weather'/'tweets' если рынок не копируем, иначе None."""
+    """Возвращает 'tweets'/'zelensky'/'esports'/'sport'/'weather' если рынок не копируем, иначе None."""
     t = (title or "").lower()
     if _is_tweet_count(t):
         return "tweets"                                # твит-каунт-корзины: категория без эджа
+    if ("zelensky" in t or "zelenskyy" in t) and ("post" in t or "tweet" in t):
+        return "zelensky"                             # посты/твиты Зеленского — та же лотерея, что твит-каунт
+    if any(k in t for k in ESPORTS_KW):
+        return "esports"                              # киберспорт
     if any(k in t for k in SPORT_MARKET_KW):
         if _is_mention(t):
             return None                                # mention-рынок: спорт-фильтр не про него
