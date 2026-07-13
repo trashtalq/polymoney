@@ -198,8 +198,13 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
 
     while True:
         try:
-            r = s.get(f"{server}/api/signals", params={"g": group, "since": state["last_t"]},
-                      timeout=25).json()
+            allow = load_allowlist()                   # копи-набор = локальный allowlist (источник правды)
+            params = {"since": state["last_t"]}
+            if allow:                                  # лента РОВНО по нашим кошелькам (из main-книги)
+                params["wallets"] = ",".join(sorted(allow))
+            else:                                      # allowlist пуст -> лента группы (fallback)
+                params["g"] = group
+            r = s.get(f"{server}/api/signals", params=params, timeout=25).json()
         except Exception as ex:  # noqa: BLE001
             print(f"[{time.strftime('%H:%M:%S')}] сервер недоступен ({ex})", flush=True)
             time.sleep(poll)

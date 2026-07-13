@@ -585,13 +585,24 @@ class App(tk.Tk):
 
     def _wallets_work(self, quiet):
         srv = self._server()
+        # КОПИ-НАБОР = ЛОКАЛЬНЫЙ allowlist (источник правды): добавленное видно сразу, без сервера/пароля
         try:
-            r = requests.get(srv + "/api/state", params={"g": "core"}, timeout=20).json()
+            allow = [str(w).lower() for w in json.loads(ALLOW_FILE.read_text(encoding="utf-8"))] \
+                if ALLOW_FILE.exists() else []
+        except Exception:  # noqa: BLE001
+            allow = []
+        try:
+            main = requests.get(srv + "/api/state", timeout=20).json().get("per_wallet", []) or []
         except Exception as ex:  # noqa: BLE001
             if not quiet:
                 self.after(0, lambda: messagebox.showerror("Сервер недоступен", str(ex)))
-            return
-        rows = r.get("per_wallet", []) or []
+            main = []
+        srcmap = {(w.get("wallet") or "").lower(): w for w in main}
+        if allow:                                          # показываем ровно наш allowlist
+            rows = [{"wallet": a, "source": (srcmap.get(a) or {}).get("source", "—"),
+                     "copy_paused": False} for a in allow]
+        else:                                              # пусто -> что знает сервер (fallback)
+            rows = main
         funder = (read_env().get("FUNDER") or "").strip()
         real = self._real_pnl(srv, funder, [w.get("wallet", "") for w in rows])
         self.after(0, lambda: self._render_wallets(rows, real))
@@ -666,38 +677,14 @@ class App(tk.Tk):
         if not (addr.startswith("0x") and len(addr) == 42):
             messagebox.showerror("Адрес", "Нужен адрес вида 0x… (42 символа).")
             return
-        pw = self._pw()
-        if not pw:
-            return
-        r = self._api_post("/api/add_wallet",
-                           {"pw": pw, "wallets": [addr], "source": CORE_LABEL, "relabel": True})
-        if r and r.get("ok"):
-            allow_update(add=addr)                 # синхроним локальный allowlist бота
-            self.addr_var.set("")
-            moved = "перенесён в core-реал" if r.get("relabeled") else (
-                "добавлен" if r.get("added") else "уже в core")
-            self._log_raw(f"➕ {moved} (+ allowlist): {addr[:10]}…", "green")
-            self.refresh_wallets()
-        elif r:
-            messagebox.showerror("Не добавилось", str(r.get("error", r)))
+        allow_update(add=addr)                     # ЛОКАЛЬНО и МГНОВЕННО — без пароля/сервера
+        self.addr_var.set("")
+        self._log_raw(f"➕ Добавлен в копи: {addr[:10]}… (бот копирует его новые сделки)", "green")
+        self.refresh_wallets()
 
     def toggle_pause(self):
-        iid = self._selected()
-        if not iid:
-            return
-        row = self.wallet_rows[iid]
-        pw = self._pw()
-        if not pw:
-            return
-        new_paused = not row["paused"]
-        r = self._api_post("/api/wallet_pause",
-                           {"pw": pw, "wallet": row["addr"], "paused": new_paused})
-        if r and r.get("ok"):
-            self._log_raw(("⏸ Пауза копи: " if new_paused else "▶ Копи включено: ")
-                          + row["addr"][:10] + "…", "amber" if new_paused else "green")
-            self.refresh_wallets()
-        elif r:
-            messagebox.showerror("Не вышло", str(r.get("error", r)))
+        # В allowlist-модели «пауза» = убрать из копи (вернуть = добавить адрес заново).
+        self.remove_wallet()
 
     def remove_wallet(self):
         iid = self._selected()
@@ -705,18 +692,11 @@ class App(tk.Tk):
             return
         row = self.wallet_rows[iid]
         if not messagebox.askyesno("Убрать кошелёк",
-                                   f"Совсем убрать {row['addr'][:10]}… из копи?"):
+                                   f"Убрать {row['addr'][:10]}… из копи?"):
             return
-        pw = self._pw()
-        if not pw:
-            return
-        r = self._api_post("/api/remove_wallet", {"pw": pw, "wallet": row["addr"]})
-        if r and r.get("ok"):
-            allow_update(remove=row["addr"])       # синхроним локальный allowlist бота
-            self._log_raw(f"✕ Убран из копи (и из allowlist): {row['addr'][:10]}…", "red")
-            self.refresh_wallets()
-        elif r:
-            messagebox.showerror("Не вышло", str(r.get("error", r)))
+        allow_update(remove=row["addr"])           # ЛОКАЛЬНО и МГНОВЕННО — без пароля/сервера
+        self._log_raw(f"✕ Убран из копи: {row['addr'][:10]}…", "red")
+        self.refresh_wallets()
 
     def _on_close(self):
         if self.proc and not messagebox.askyesno(

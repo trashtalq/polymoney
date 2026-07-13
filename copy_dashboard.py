@@ -1939,19 +1939,29 @@ def api_real():
 def api_signals():
     """Сигналы для ЛОКАЛЬНОГО исполнителя реальных денег: BUY-входы книги новее since.
     Ключей/секретов тут нет — только что купила бумага (данные и так публичны в чейне).
-    По умолчанию g=core (реал копирует ядро). Поля: t, w, tok, cid, px, spend, out, title."""
-    bk, _m, stt, _v, _sf = _slot(request.args.get("g", "core"))
+    Режимы: (1) g=core/main/… — лента книги группы (по умолч. g=core);
+    (2) wallets=addr1,addr2,… — лента ТОЛЬКО по этим кошелькам из ОСНОВНОЙ книги (в ней все
+        watchlist-кошельки). Так пульт задаёт копи-набор своим локальным allowlist — без правки
+        серверных списков. Поля: t, w, tok, cid, px, spend, out, title."""
     since = int(request.args.get("since", 0) or 0)
+    wl_param = (request.args.get("wallets") or "").strip()
+    if wl_param:                                       # лента по явному списку кошельков (из main)
+        wset = {w.strip().lower() for w in wl_param.split(",") if w.strip()}
+        bk, _m, stt, _v, _sf = _slot("main")
+        tail_n, filt = 4000, (lambda r: (r.get("w", "") or "").lower() in wset)
+    else:                                              # лента книги-группы (обратная совместимость)
+        bk, _m, stt, _v, _sf = _slot(request.args.get("g", "core"))
+        tail_n, filt = 800, (lambda r: True)
     with _lock:
         book = STATE[bk] or {"log": []}
         status = dict(STATE[stt])
         paused = bool(book.get("paused", False))
-        tail = book.get("log", [])[-800:]
+        tail = book.get("log", [])[-tail_n:]
         sigs = [r for r in tail
-                if r.get("act") == "BUY" and r.get("t", 0) > since and r.get("tok")]
+                if r.get("act") == "BUY" and r.get("t", 0) > since and r.get("tok") and filt(r)]
         # ВЫХОДЫ: цель продала (не резолв) -> мирроим выход. frac = какую долю холдинга продала.
         exits = [r for r in tail
-                 if r.get("act") == "SELL" and r.get("t", 0) > since and r.get("tok")]
+                 if r.get("act") == "SELL" and r.get("t", 0) > since and r.get("tok") and filt(r)]
     return jsonify({"now": int(time.time()), "paused": paused,
                     "last_poll": status.get("last_poll", 0),
                     "signals": [{"t": r["t"], "w": r.get("w", ""), "tok": r["tok"],
