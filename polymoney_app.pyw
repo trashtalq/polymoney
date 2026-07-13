@@ -159,6 +159,7 @@ class App(tk.Tk):
         self.minsize(880, 640)
         self.proc = None
         self.paper_proc = None     # теневой (paper) бот — отдельный процесс
+        self.paper_started = None   # когда запущен теневой (для таймера работы)
         self.q = queue.Queue()
         self.wallet_rows = {}      # iid -> {"addr":..., "paused":bool}
         self._client = None        # SDK-клиент для баланса (создаётся лениво по ключу, локально)
@@ -176,6 +177,7 @@ class App(tk.Tk):
         self.after(300, lambda: self.refresh_wallets(quiet=True))
         self.after(700, self._poll_account)
         self.after(900, self._refresh_paper_stats)
+        self.after(1000, self._tick_paper_timer)
 
     # ── стили ──
     def _style(self):
@@ -408,6 +410,8 @@ class App(tk.Tk):
                    command=self.open_paper_settings).pack(side="left", padx=(16, 0))
         ttk.Label(bar, text="  · реальные кэфы/задержки, БЕЗ денег",
                   style="Card.TLabel").pack(side="left")
+        self.puptime_lbl = ttk.Label(bar, text="⏱ 00:00:00", style="Money.TLabel")
+        self.puptime_lbl.pack(side="right")
 
         sc = ttk.Labelframe(root, text="  ТЕНЕВОЙ СЧЁТ $15k  ", padding=14)
         sc.grid(row=1, column=0, sticky="ew", pady=(0, 12))
@@ -569,6 +573,7 @@ class App(tk.Tk):
             self.paper_proc = None
             return
         threading.Thread(target=self._reader, args=(self.paper_proc, "paper"), daemon=True).start()
+        self.paper_started = time.time()             # старт таймера работы
         self.pstart_btn.config(text="■  Остановить теневой", style="Stop.TButton")
         self.pdot.itemconfig(self._pdot_id, fill=ACC)
         self.pstat_lbl.config(text="работает")
@@ -581,10 +586,25 @@ class App(tk.Tk):
             except Exception:  # noqa: BLE001
                 pass
         self.paper_proc = None
+        if self.paper_started:                       # финальное время работы в лог
+            self._log_raw(f"■ Теневой остановлен. Проработал {self._fmt_dur(time.time() - self.paper_started)}.",
+                          "muted", self.plog)
+        else:
+            self._log_raw("■ Теневой бот остановлен.", "muted", self.plog)
+        self.paper_started = None                     # стоп таймера (замирает на последнем значении)
         self.pstart_btn.config(text="▶  Запустить теневой", style="Accent.TButton")
         self.pdot.itemconfig(self._pdot_id, fill=MUT)
         self.pstat_lbl.config(text="остановлен")
-        self._log_raw("■ Теневой бот остановлен.", "muted", self.plog)
+
+    @staticmethod
+    def _fmt_dur(sec):
+        sec = int(sec); h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _tick_paper_timer(self):
+        if self.paper_started:
+            self.puptime_lbl.config(text=f"⏱ {self._fmt_dur(time.time() - self.paper_started)}")
+        self.after(1000, self._tick_paper_timer)
 
     def stop_bot(self):
         if self.proc:
