@@ -59,6 +59,19 @@ LIMITS = [
     ("EXIT_MIN_FRAC",       "Выход, когда цель продала долю",     "0.1"),
     ("POLL_SEC",            "Опрос сервера каждые, сек",          "30"),
 ]
+# ── те же лимиты для ТЕНЕВОГО бота (свои PAPER_*-ключи, независимо от реала) ──
+PAPER_LIMITS = [
+    ("PAPER_BANKROLL",           "Банкролл (стартовый), $",           "15000"),
+    ("PAPER_PER_TRADE",          "Размер ставки в позицию, $",         "10"),
+    ("PAPER_MAX_PER_WALLET",     "Лимит на кошелёк (в позах), $",      "300"),
+    ("PAPER_MAX_PRICE",          "Макс. цена входа (0–1)",             "0.92"),
+    ("PAPER_MIN_PRICE",          "Мин. цена входа (не лонгшоты)",      "0.12"),
+    ("PAPER_MAX_ENTRIES_PER_POS", "Макс. входов в одну позицию",       "3"),
+    ("PAPER_MAX_AGE_MIN",        "Не копировать сигналы старше, мин",  "5"),
+    ("PAPER_MAX_RESOLVE_DAYS",   "Горизонт резолва рынка, дн (0=выкл)", "0"),
+    ("PAPER_EXIT_MIN_FRAC",      "Выход, когда цель продала долю",     "0.1"),
+    ("PAPER_POLL_SEC",           "Опрос сервера каждые, сек",          "30"),
+]
 DEFAULT_SERVER = "http://144.31.197.121:5000"
 CORE_LABEL = "core-реал"
 
@@ -339,42 +352,46 @@ class App(tk.Tk):
         self._log_raw("dry = ничего не тратит (тест) · smoke = 1 живая сделка · "
                       "live = реальные деньги.", "muted")
 
-    # ── окно «⚙ Лимиты»: поля настроек в отдельном попапе (в главном окне их место занял лог) ──
-    def open_settings(self):
-        win = getattr(self, "_settings_win", None)
-        if win is not None and win.winfo_exists():
-            win.lift(); win.focus_force(); return
-        win = tk.Toplevel(self); self._settings_win = win
-        win.title("Лимиты и ставка")
+    # ── окно настроек (общее для Реала и Теневого): поля в попапе ──
+    def _open_limits(self, fields, spec, title, saver):
+        win = tk.Toplevel(self)
+        win.title(title)
         win.configure(bg=PANEL)
         win.transient(self)
         win.resizable(False, False)
-        lf = ttk.Labelframe(win, text="  ЛИМИТЫ И СТАВКА  ", padding=14)
+        lf = ttk.Labelframe(win, text=f"  {title}  ", padding=14)
         lf.pack(fill="both", expand=True, padx=12, pady=12)
         lf.columnconfigure(0, weight=1)
-        for i, (key, label, _d) in enumerate(LIMITS):
+        for i, (key, label, _d) in enumerate(spec):
             row = ttk.Frame(lf, style="Card.TFrame")
             row.grid(row=i, column=0, sticky="ew", pady=3)
             row.columnconfigure(0, weight=1)
             ttk.Label(row, text=label, style="Field.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Entry(row, textvariable=self.fields[key], width=8, justify="right").grid(
+            ttk.Entry(row, textvariable=fields[key], width=8, justify="right").grid(
                 row=0, column=1, sticky="e", padx=(12, 0))
         btns = ttk.Frame(lf, style="Card.TFrame")
-        btns.grid(row=len(LIMITS), column=0, sticky="ew", pady=(12, 0))
+        btns.grid(row=len(spec), column=0, sticky="ew", pady=(12, 0))
+
+        def do_save():
+            if saver():
+                try:
+                    win.destroy()
+                except Exception:  # noqa: BLE001
+                    pass
         ttk.Button(btns, text="💾  Сохранить", style="Accent.TButton",
-                   command=self._save_and_close).pack(side="left")
+                   command=do_save).pack(side="left")
         ttk.Button(btns, text="↺ сбросить", style="Small.TButton",
                    command=self._load_into_fields).pack(side="left", padx=6)
 
-    def _save_and_close(self):
-        if self.save_limits() and getattr(self, "_settings_win", None):
-            try:
-                self._settings_win.destroy()
-            except Exception:  # noqa: BLE001
-                pass
+    def open_settings(self):
+        self._open_limits(self.fields, LIMITS, "Лимиты — Реал", self.save_limits)
+
+    def open_paper_settings(self):
+        self._open_limits(self.pfields, PAPER_LIMITS, "Настройки теневого $15k", self.save_paper_limits)
 
     # ── вкладка «Теневой $15k»: тот же бот на виртуальный банк, реальные кэфы ──
     def _build_paper(self, root):
+        self.pfields = {key: tk.StringVar(value=default) for key, _l, default in PAPER_LIMITS}
         root.columnconfigure(0, weight=1)
         root.rowconfigure(2, weight=1)
         bar = ttk.Frame(root, style="Card.TFrame", padding=12)
@@ -387,7 +404,9 @@ class App(tk.Tk):
         self._pdot_id = self.pdot.create_oval(2, 2, 12, 12, fill=MUT, outline="")
         self.pstat_lbl = ttk.Label(bar, text="остановлен", style="Stat.TLabel")
         self.pstat_lbl.pack(side="left")
-        ttk.Label(bar, text="  · та же логика/задержки/кэфы, банк $15k, БЕЗ денег",
+        ttk.Button(bar, text="⚙ Настройки теневого", style="Small.TButton",
+                   command=self.open_paper_settings).pack(side="left", padx=(16, 0))
+        ttk.Label(bar, text="  · реальные кэфы/задержки, БЕЗ денег",
                   style="Card.TLabel").pack(side="left")
 
         sc = ttk.Labelframe(root, text="  ТЕНЕВОЙ СЧЁТ $15k  ", padding=14)
@@ -422,34 +441,44 @@ class App(tk.Tk):
                       "cyan", self.plog)
 
     # ───────────────────── env поля ─────────────────────
-    def _load_into_fields(self):
+    def _load_fields(self, fields, spec):
+        """Заполнить StringVars из polymarket.env. Ключ *AGE_MIN читается из *AGE_SEC (÷60)."""
         cfg = read_env()
-        self.mode_var.set((cfg.get("MODE") or "dry").lower())
-        for key, _label, default in LIMITS:
-            if key == "MAX_AGE_MIN":
-                sec = cfg.get("MAX_AGE_SEC", "300")
+        for key, _label, default in spec:
+            if key.endswith("AGE_MIN"):
+                sec = cfg.get(key.replace("AGE_MIN", "AGE_SEC"))
                 try:
-                    self.fields[key].set(str(round(float(sec) / 60)))
+                    fields[key].set(str(round(float(sec) / 60)) if sec else default)
                 except Exception:  # noqa: BLE001
-                    self.fields[key].set(default)
+                    fields[key].set(default)
             else:
-                self.fields[key].set(cfg.get(key, default))
+                fields[key].set(cfg.get(key, default))
 
-    def save_limits(self, silent=False):
+    def _load_into_fields(self):
+        self.mode_var.set((read_env().get("MODE") or "dry").lower())
+        self._load_fields(self.fields, LIMITS)
+        self._load_fields(self.pfields, PAPER_LIMITS)
+
+    def _collect_limits(self, fields, spec):
+        """Собрать {env_key: value} из полей. Возвращает (updates, bad_labels)."""
         updates, bad = {}, []
-        for key, label, _d in LIMITS:
-            raw = self.fields[key].get().strip().replace(",", ".")
+        for key, label, _d in spec:
+            raw = fields[key].get().strip().replace(",", ".")
             try:
                 val = float(raw)
             except Exception:  # noqa: BLE001
                 bad.append(label)
                 continue
-            if key == "MAX_AGE_MIN":
-                updates["MAX_AGE_SEC"] = str(int(round(val * 60)))
-            elif key in ("MAX_ENTRIES_PER_POS", "POLL_SEC"):
+            if key.endswith("AGE_MIN"):
+                updates[key.replace("AGE_MIN", "AGE_SEC")] = str(int(round(val * 60)))
+            elif key.endswith("ENTRIES_PER_POS") or key.endswith("POLL_SEC"):
                 updates[key] = str(int(round(val)))
             else:
                 updates[key] = ("%g" % val)
+        return updates, bad
+
+    def save_limits(self, silent=False):
+        updates, bad = self._collect_limits(self.fields, LIMITS)
         if bad:
             messagebox.showerror("Проверь числа", "Не числа в полях:\n• " + "\n• ".join(bad))
             return False
@@ -458,6 +487,18 @@ class App(tk.Tk):
         if not silent:
             self._log_raw("✔ Лимиты сохранены в polymarket.env" +
                           (" — перезапусти бота, чтобы применить." if self.proc else "."), "green")
+        return True
+
+    def save_paper_limits(self, silent=False):
+        updates, bad = self._collect_limits(self.pfields, PAPER_LIMITS)
+        if bad:
+            messagebox.showerror("Проверь числа", "Не числа в полях:\n• " + "\n• ".join(bad))
+            return False
+        write_env(updates)
+        if not silent:
+            self._log_raw("✔ Настройки теневого сохранены" +
+                          (" — перезапусти теневой, чтобы применить." if self.paper_proc else "."),
+                          "green", self.plog)
         return True
 
     # ───────────────────── бот ─────────────────────
@@ -513,7 +554,7 @@ class App(tk.Tk):
     def start_paper(self):
         if not BOT.exists():
             return
-        self.save_limits(silent=True)                # общие лимиты (цена/возраст) — и теневому
+        self.save_paper_limits(silent=True)          # свои PAPER_*-настройки перед запуском
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["MODE"] = "paper"                        # переопределяет MODE из файла для ЭТОГО процесса

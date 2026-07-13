@@ -563,20 +563,31 @@ def main():
 
     if mode == "paper":
         # ТЕНЕВОЙ БОТ: та же логика/гварды/задержки, но «покупает» по реальным кэфам в виртуальный
-        # банк. Ключ НЕ нужен. Отвечает на «а что было бы на $15k при ставке $10 без голода».
+        # банк. Ключ НЕ нужен. Все лимиты — СВОИ (PAPER_*), с откатом на общие/дефолты.
         import copy_trader as ct
-        bankroll = float(cfg.get("PAPER_BANKROLL") or 15000)
-        p_trade = float(cfg.get("PAPER_PER_TRADE") or 10)
-        p_wallet = float(cfg.get("PAPER_MAX_PER_WALLET") or 300)
+        def pf(key, fb):                             # PAPER_-переопределение с откатом на общий/дефолт
+            v = cfg.get(key)
+            return float(v) if v not in (None, "") else float(fb)
+        bankroll = pf("PAPER_BANKROLL", 15000)
+        p_trade = pf("PAPER_PER_TRADE", 10)
+        p_wallet = pf("PAPER_MAX_PER_WALLET", 300)
+        p_maxpx = pf("PAPER_MAX_PRICE", max_price)
+        p_minpx = pf("PAPER_MIN_PRICE", min_price)
+        p_entries = int(pf("PAPER_MAX_ENTRIES_PER_POS", max_entries))
+        p_age = int(pf("PAPER_MAX_AGE_SEC", max_age))
+        p_resolve = pf("PAPER_MAX_RESOLVE_DAYS", max_resolve_days)
+        p_exit = pf("PAPER_EXIT_MIN_FRAC", exit_min_frac)
+        p_poll = int(pf("PAPER_POLL_SEC", poll))
         pstate = pst_load(bankroll)
         pstate["bankroll"] = bankroll                # если поменяли банк в env — подхватываем
         api = ct.API()
         pclient = PaperClient(pstate, api, slip=float(cfg.get("PAPER_SLIP") or 0.01))
         print(f"=== ТЕНЕВОЙ (PAPER) | банк ${bankroll:,.0f} | ставка ${p_trade:g} | на кошелёк ${p_wallet:g} "
-              f"| цена {min_price:g}-{max_price:g} | реальные кэфы+задержки, БЕЗ денег ===", flush=True)
-        run_loop("paper", pclient, server, group, bankroll, p_trade, bankroll, max_price, poll, max_age,
-                 max_entries, "", p_wallet, max_resolve_days, exit_min_frac,
-                 signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=min_price,
+              f"| цена {p_minpx:g}-{p_maxpx:g} | до {p_entries}x | реальные кэфы+задержки, БЕЗ денег ===",
+              flush=True)
+        run_loop("paper", pclient, server, group, bankroll, p_trade, bankroll, p_maxpx, p_poll, p_age,
+                 p_entries, "", p_wallet, p_resolve, p_exit,
+                 signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=p_minpx,
                  paper=True, pstate=pstate)
         return
 
