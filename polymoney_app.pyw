@@ -462,7 +462,9 @@ class App(tk.Tk):
         if not line.strip():
             return
         low = line.lower()
-        if any(x in low for x in ("!!", "стоп", "не прош", "недоступ", "ошиб", "error", "traceback")):
+        if "связь с биржей моргнула" in low or ("сеть" in low and "повтор" in low):
+            tag, icon = "amber", "🌐"                # сетевой блип — не тревога, само повторится
+        elif any(x in low for x in ("!!", "стоп", "не прош", "недоступ", "ошиб", "error", "traceback")):
             tag, icon = "red", "⛔"
         elif "выход" in low or "продал" in low or "sell" in low:
             tag, icon = "amber", "🔴"

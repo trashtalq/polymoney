@@ -371,6 +371,12 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                           flush=True)
                     state["done"].append(k)
                     st_save(state)
+                elif any(x in low for x in ("ssl", "handshake", "timed out", "timeout", "eof",
+                                            "connection", "temporarily", "max retries", "read operation")):
+                    # СЕТЕВОЙ обрыв TLS до биржи (не наша вина, часто нестабильный интернет/VPN):
+                    # ордер НЕ разместился, сигнал НЕ помечаем -> повторим. Дубль (если запрос всё же
+                    # дошёл, а ответ потерялся) отсекут held-проверка позы и MAX_ENTRIES на след. цикле.
+                    print(f"  связь с биржей моргнула (сеть) — повторю: {title}", flush=True)
                 else:
                     print(f"  !! ордер не прошёл ({ex}) — сигнал НЕ помечен, повторим позже", flush=True)
 
