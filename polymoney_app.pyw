@@ -181,6 +181,7 @@ class App(tk.Tk):
         self.after(700, self._poll_account)
         self.after(900, self._refresh_paper_stats)
         self.after(1000, self._tick_paper_timer)
+        self.after(1100, self._poll_positions)
 
     # ── стили ──
     def _style(self):
@@ -259,10 +260,13 @@ class App(tk.Tk):
         self.nb.pack(fill="both", expand=True)
         real = ttk.Frame(self.nb, padding=10)
         paper = ttk.Frame(self.nb, padding=10)
+        positions = ttk.Frame(self.nb, padding=10)
         self.nb.add(real, text="  💰 Реал  ")
         self.nb.add(paper, text="  🌗 Теневой $15k  ")
+        self.nb.add(positions, text="  📋 Позиции теневого  ")
         self._build_real(real)
         self._build_paper(paper)
+        self._build_positions(positions)
 
     def _build_real(self, root):
         root.columnconfigure(0, weight=1, uniform="c")
@@ -446,6 +450,78 @@ class App(tk.Tk):
             self.plog.tag_configure(tag, foreground=col)
         self._log_raw("Теневой бот: те же кошельки на виртуальный $15k. Жми «Запустить».",
                       "cyan", self.plog)
+
+    # ── вкладка «Позиции теневого»: НАШИ цены входа/выхода + потеря на задержке (сверка с Polymarket) ──
+    def _build_positions(self, root):
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(1, weight=1)
+        top = ttk.Frame(root, style="Card.TFrame", padding=10)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(top, text="Позиции теневого — НАШИ цены входа/выхода (сверяй с Polymarket)",
+                  style="Card.TLabel").pack(side="left")
+        self.posdelay_lbl = ttk.Label(top, text="", style="Money.TLabel")
+        self.posdelay_lbl.pack(side="left", padx=(16, 0))
+        ttk.Button(top, text="🔄 Обновить", style="Small.TButton",
+                   command=self.refresh_positions).pack(side="right")
+        wrap = ttk.Frame(root)
+        wrap.grid(row=1, column=0, sticky="nsew")
+        wrap.columnconfigure(0, weight=1)
+        wrap.rowconfigure(0, weight=1)
+        cols = ("mkt", "side", "entry", "target", "delay", "exit", "pnl", "st")
+        self.postree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse")
+        for c, t, w in (("mkt", "Рынок", 320), ("side", "Ставка", 66), ("entry", "Наш вход", 78),
+                        ("target", "Цена цели", 78), ("delay", "Задержка $", 90),
+                        ("exit", "Наш выход", 78), ("pnl", "Реализ $", 80), ("st", "", 34)):
+            self.postree.heading(c, text=t)
+            self.postree.column(c, width=w, anchor="w" if c == "mkt" else "center")
+        self.postree.grid(row=0, column=0, sticky="nsew")
+        psb = ttk.Scrollbar(wrap, command=self.postree.yview)
+        psb.grid(row=0, column=1, sticky="ns")
+        self.postree["yscrollcommand"] = psb.set
+        self.postree.tag_configure("open", foreground=ACC)
+        self.postree.tag_configure("win", foreground=GRN)
+        self.postree.tag_configure("lose", foreground=RED)
+
+    def refresh_positions(self):
+        try:
+            p = json.loads(PAPER.read_text(encoding="utf-8")) if PAPER.exists() else {}
+        except Exception:  # noqa: BLE001
+            p = {}
+        self.postree.delete(*self.postree.get_children())
+
+        def dlay(entry, target, shares):             # <0 = переплатили из-за задержки
+            return (target - entry) * shares if target else None
+        total_delay = 0.0
+        for _tok, pos in (p.get("pos") or {}).items():          # открытые
+            entry = pos.get("entry") or 0
+            target = pos.get("target_px")
+            d = dlay(entry, target, pos.get("shares", 0))
+            if d is not None:
+                total_delay += d
+            self.postree.insert("", "end", tags=("open",), values=(
+                pos.get("title", "")[:52], pos.get("outcome", "")[:6],
+                f"{entry:.3f}", f"{target:.3f}" if target else "—",
+                f"{d:+.2f}" if d is not None else "—", "—", "открыта", "🟢"))
+        for c in reversed(p.get("closed") or []):               # закрытые, свежие сверху
+            entry = c.get("entry") or 0
+            target = c.get("target_px")
+            d = dlay(entry, target, c.get("shares", 0))
+            if d is not None:
+                total_delay += d
+            real = c.get("realized", 0)
+            self.postree.insert("", "end", tags=("win" if real > 0 else "lose",), values=(
+                c.get("title", "")[:52], c.get("outcome", "")[:6],
+                f"{entry:.3f}", f"{target:.3f}" if target else "—",
+                f"{d:+.2f}" if d is not None else "—", f"{c.get('exit_px', 0):.3f}",
+                f"{real:+.2f}", "✓"))
+        self.posdelay_lbl.config(text=f"потеряно на задержке: {total_delay:+,.2f}$")
+
+    def _poll_positions(self):
+        try:
+            self.refresh_positions()
+        except Exception:  # noqa: BLE001
+            pass
+        self.after(5000, self._poll_positions)
 
     # ───────────────────── env поля ─────────────────────
     def _load_fields(self, fields, spec):

@@ -236,6 +236,16 @@ class PaperClient:
                 cost_part = pos["cost"] * (sh / pos["shares"])
                 self.p["realized"] = round(self.p["realized"] + proceeds - cost_part, 2)
                 self.p["cash"] = round(self.p["cash"] + proceeds, 2)
+                entry = pos.get("entry") or (pos["cost"] / pos["shares"] if pos["shares"] else 0)
+                self.p.setdefault("closed", []).append({   # журнал закрытой сделки (для сверки)
+                    "title": pos.get("title", ""), "outcome": pos.get("outcome", ""),
+                    "cid": pos.get("cid", ""), "w": pos.get("w", ""),
+                    "entry": round(entry, 4), "target_px": pos.get("target_px"),
+                    "exit_px": round(mid, 4), "shares": round(sh, 2),
+                    "realized": round(proceeds - cost_part, 2),
+                    "t_open": pos.get("t_open"), "t_close": int(time.time())})
+                if len(self.p["closed"]) > 300:
+                    self.p["closed"] = self.p["closed"][-300:]
                 pos["shares"] -= sh
                 pos["cost"] = round(pos["cost"] - cost_part, 4)
                 if pos["shares"] <= 1e-6:
@@ -448,9 +458,16 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 if ok:
                     state["done"].append(k)
                     session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade
-                    if paper:                        # метаданные виртуальной позы (для отчёта)
-                        pstate.setdefault("meta", {})[sig["tok"]] = {
-                            "cid": sig.get("cid", ""), "title": title, "w": sig_w}
+                    if paper:                        # обогащаем виртуальную позу для журнала/сверки
+                        pr = pstate["pos"].get(sig["tok"])
+                        if pr is not None:
+                            pr["title"] = title
+                            pr["outcome"] = sig.get("out", "")
+                            pr["cid"] = sig.get("cid", "")
+                            pr["w"] = sig_w
+                            pr.setdefault("target_px", round(float(sig.get("px") or 0), 4))  # цена ЦЕЛИ
+                            pr.setdefault("t_open", int(time.time()))
+                            pr["entry"] = round(pr["cost"] / pr["shares"], 4) if pr["shares"] else 0
                     state["tok_wallet"].setdefault(sig["tok"], sig_w)   # токен -> источник (для лимита)
                     state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + per_trade
                     state["spent_total"] = round(state["spent_total"] + per_trade, 2)
