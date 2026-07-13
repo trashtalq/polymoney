@@ -157,6 +157,96 @@ def fetch_held(s, funder):
     return out
 
 
+# ════════════ ТЕНЕВОЙ (PAPER) РЕЖИМ: тот же бот на виртуальный банкролл, реальные кэфы ════════════
+PAPER_FILE = HERE / "paper15k_state.json"
+
+
+def pst_load(bankroll):
+    if PAPER_FILE.exists():
+        try:
+            return json.loads(PAPER_FILE.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            pass
+    return {"bankroll": bankroll, "cash": bankroll, "pos": {}, "meta": {},
+            "realized": 0.0, "buys": 0, "sells": 0}
+
+
+def pst_save(p):
+    PAPER_FILE.write_text(json.dumps(p, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def paper_held(p):
+    """held-снимок как fetch_held, но по ВИРТУАЛЬНЫМ позициям: {tok:{usd:вложено, shares:долей}}."""
+    return {t: {"usd": v["cost"], "shares": v["shares"]} for t, v in p["pos"].items()}
+
+
+def paper_equity(p, api):
+    """Стоимость счёта = кэш + переоценка открытых по РЕАЛЬНЫМ мидпоинтам. Возвращает (equity, pnl)."""
+    toks = list(p["pos"].keys())
+    marks = {}
+    if toks:
+        try:
+            marks = api.midpoints(toks)
+        except Exception:  # noqa: BLE001
+            marks = {}
+    val = 0.0
+    for t, v in p["pos"].items():
+        m = marks.get(t)
+        px = float(m) if m is not None else (v["cost"] / v["shares"] if v["shares"] else 0)
+        val += v["shares"] * px
+    eq = round(p["cash"] + val, 2)
+    return eq, round(eq - p["bankroll"], 2)
+
+
+class PaperClient:
+    """Имитация SDK-клиента: «исполняет» ордера по РЕАЛЬНОЙ текущей цене (CLOB midpoint) в
+    виртуальный портфель. Ключ/деньги НЕ нужны — только замер. Интерфейс как у SecureClient."""
+    def __init__(self, pstate, api, slip=0.01):
+        self.p = pstate
+        self.api = api
+        self.slip = slip
+
+    def _mid(self, tok):
+        try:
+            m = self.api.midpoints([tok]).get(tok)
+            return float(m) if m is not None else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def place_market_order(self, token_id, side, amount=None, shares=None,
+                           order_type=None, max_price=None):
+        mid = self._mid(token_id)
+        if mid is None or not (0 < mid < 1):
+            raise Exception("paper: midpoint недоступен")
+        if side == "BUY":
+            fill = round(mid + self.slip, 4)
+            if max_price and fill > max_price + 1e-9:      # как реальный FAK-no-fill -> спокойный пропуск
+                raise Exception("no orders found to match with FAK order")
+            sh = float(amount) / fill
+            pos = self.p["pos"].setdefault(token_id, {"shares": 0.0, "cost": 0.0})
+            pos["shares"] += sh
+            pos["cost"] = round(pos["cost"] + float(amount), 4)
+            self.p["cash"] = round(self.p["cash"] - float(amount), 2)
+            self.p["buys"] += 1
+        else:                                              # SELL
+            pos = self.p["pos"].get(token_id)
+            if pos and pos["shares"] > 0:
+                sh = min(float(shares), pos["shares"])
+                proceeds = sh * mid
+                cost_part = pos["cost"] * (sh / pos["shares"])
+                self.p["realized"] = round(self.p["realized"] + proceeds - cost_part, 2)
+                self.p["cash"] = round(self.p["cash"] + proceeds, 2)
+                pos["shares"] -= sh
+                pos["cost"] = round(pos["cost"] - cost_part, 4)
+                if pos["shares"] <= 1e-6:
+                    self.p["pos"].pop(token_id, None)
+                self.p["sells"] += 1
+        return type("R", (), {"success": True})()
+
+    def close(self):
+        pass
+
+
 def resp_ok(resp):
     """Успех ордера по ответу нового SDK (OrderResponse — типизированный объект, не dict)."""
     for attr in ("success",):
@@ -175,7 +265,7 @@ def resp_ok(resp):
 
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
              max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
-             signals_token="", min_price=0.12):
+             signals_token="", min_price=0.12, paper=False, pstate=None):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -241,7 +331,10 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             time.sleep(poll)
             continue
 
-        if funder:                                   # реальные вложения по токенам (для лимита позы)
+        if paper:                                    # теневой режим: held из виртуального портфеля
+            held = paper_held(pstate)
+            session_add = {}
+        elif funder:                                 # реальные вложения по токенам (для лимита позы)
             h = fetch_held(s, funder)
             if h is not None:
                 held = h
@@ -303,9 +396,9 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             # упал). При funder считаем по реальной экспозиции; без funder (dry) — старый дневной счётчик.
             sig_w = (sig.get("w", "") or "")
             if max_per_wallet:
-                wexp = wallet_exposure(sig_w) if funder else state["spent_by_wallet"].get(sig_w, 0.0)
+                wexp = wallet_exposure(sig_w) if (funder or paper) else state["spent_by_wallet"].get(sig_w, 0.0)
                 if wexp + per_trade > max_per_wallet + 1e-6:
-                    unit = "в позах" if funder else "за день"
+                    unit = "в позах" if (funder or paper) else "за день"
                     print(f"  skip (с кошелька {sig_w[:8]}… {unit} уже ~${wexp:.2f}, лимит "
                           f"${max_per_wallet:.0f} — ждём закрытия его позиций): {title}", flush=True)
                     state["done"].append(k)
@@ -314,7 +407,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             # позиция закрывается/продаётся — бюджет освобождается сам (held падает). Считаем по
             # реальным холдингам с чейна (funder) + входы этого цикла. Без funder — старый счётчик.
             exposure = (sum(v.get("usd", 0.0) for v in held.values()) + sum(session_add.values())
-                        if funder else state["spent_total"])
+                        if (funder or paper) else state["spent_total"])
             if exposure + per_trade > deposit + 1e-6:
                 print(f"  skip (в открытых позах ~${exposure:.2f}+${per_trade:g} > депозит ${deposit:g} "
                       f"— ждём, пока освободятся): {title}", flush=True)
@@ -350,11 +443,14 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                     token_id=sig["tok"], side="BUY", amount=float(per_trade),
                     order_type="FAK", max_price=cap)
                 ok = resp_ok(resp)
-                print(f"  [{'SMOKE' if mode == 'smoke' else 'LIVE'}] ордер: {line} -> {resp!r}",
-                      flush=True)
+                _tag = "PAPER" if paper else ("SMOKE" if mode == "smoke" else "LIVE")
+                print(f"  [{_tag}] ордер: {line}" + ("" if paper else f" -> {resp!r}"), flush=True)
                 if ok:
                     state["done"].append(k)
                     session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade
+                    if paper:                        # метаданные виртуальной позы (для отчёта)
+                        pstate.setdefault("meta", {})[sig["tok"]] = {
+                            "cid": sig.get("cid", ""), "title": title, "w": sig_w}
                     state["tok_wallet"].setdefault(sig["tok"], sig_w)   # токен -> источник (для лимита)
                     state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + per_trade
                     state["spent_total"] = round(state["spent_total"] + per_trade, 2)
@@ -427,6 +523,13 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
         state["tok_wallet"] = {t: w for t, w in state["tok_wallet"].items()
                                if t in held or t in session_add}
         st_save(state)
+        if paper:                                    # теневой отчёт: виртуальный банк и PnL
+            eq, pnl = paper_equity(pstate, client.api)
+            roi = pnl / pstate["bankroll"] * 100 if pstate["bankroll"] else 0
+            print(f"  [PAPER] банк ${eq:,.0f} (старт ${pstate['bankroll']:,.0f}) | PnL {pnl:+,.0f}$ "
+                  f"({roi:+.1f}%) | реализ {pstate['realized']:+,.0f}$ | позиций {len(pstate['pos'])} "
+                  f"| кэш ${pstate['cash']:,.0f} | сделок {pstate['buys']}/{pstate['sells']}", flush=True)
+            pst_save(pstate)
         time.sleep(poll)
 
 
@@ -455,6 +558,25 @@ def main():
           f"резолв {rezolv} | до {max_entries}x в позу | ВЫХОДЫ вслед за целью (>={exit_min_frac:g}) ===",
           flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
+
+    if mode == "paper":
+        # ТЕНЕВОЙ БОТ: та же логика/гварды/задержки, но «покупает» по реальным кэфам в виртуальный
+        # банк. Ключ НЕ нужен. Отвечает на «а что было бы на $15k при ставке $10 без голода».
+        import copy_trader as ct
+        bankroll = float(cfg.get("PAPER_BANKROLL") or 15000)
+        p_trade = float(cfg.get("PAPER_PER_TRADE") or 10)
+        p_wallet = float(cfg.get("PAPER_MAX_PER_WALLET") or 300)
+        pstate = pst_load(bankroll)
+        pstate["bankroll"] = bankroll                # если поменяли банк в env — подхватываем
+        api = ct.API()
+        pclient = PaperClient(pstate, api, slip=float(cfg.get("PAPER_SLIP") or 0.01))
+        print(f"=== ТЕНЕВОЙ (PAPER) | банк ${bankroll:,.0f} | ставка ${p_trade:g} | на кошелёк ${p_wallet:g} "
+              f"| цена {min_price:g}-{max_price:g} | реальные кэфы+задержки, БЕЗ денег ===", flush=True)
+        run_loop("paper", pclient, server, group, bankroll, p_trade, bankroll, max_price, poll, max_age,
+                 max_entries, "", p_wallet, max_resolve_days, exit_min_frac,
+                 signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=min_price,
+                 paper=True, pstate=pstate)
+        return
 
     if mode == "dry":
         run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
