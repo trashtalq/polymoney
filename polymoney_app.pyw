@@ -269,6 +269,8 @@ class App(tk.Tk):
         self._dot_id = self.dot.create_oval(2, 2, 12, 12, fill=MUT, outline="")
         self.stat_lbl = ttk.Label(bar, text="остановлен", style="Stat.TLabel")
         self.stat_lbl.pack(side="left")
+        ttk.Button(bar, text="⚙ Лимиты", style="Small.TButton",
+                   command=self.open_settings).pack(side="left", padx=(16, 0))
         ttk.Label(bar, text="", style="Card.TLabel").pack(side="left", expand=True, fill="x")
         # ── баланс Polymarket: портфель (позиции+наличные) и «Доступно» (кэш, по ключу локально) ──
         money = ttk.Frame(bar, style="Card.TFrame")
@@ -282,30 +284,12 @@ class App(tk.Tk):
         self.spend_lbl = ttk.Label(money, text="$0.00", style="Stat.TLabel")
         self.spend_lbl.grid(row=1, column=2, padx=(20, 0), sticky="w")
 
-        # ── лимиты ──
-        lf = ttk.Labelframe(root, text="  ЛИМИТЫ И СТАВКА  ", padding=12)
-        lf.grid(row=2, column=0, sticky="nsew", padx=(0, 6))
-        lf.columnconfigure(0, weight=1)
-        self.fields = {}
-        for i, (key, label, default) in enumerate(LIMITS):
-            row = ttk.Frame(lf, style="Card.TFrame")
-            row.grid(row=i, column=0, sticky="ew", pady=3)
-            row.columnconfigure(0, weight=1)
-            ttk.Label(row, text=label, style="Field.TLabel").grid(row=0, column=0, sticky="w")
-            var = tk.StringVar(value=default)
-            ent = ttk.Entry(row, textvariable=var, width=8, justify="right")
-            ent.grid(row=0, column=1, sticky="e")
-            self.fields[key] = var
-        btns = ttk.Frame(lf, style="Card.TFrame")
-        btns.grid(row=len(LIMITS), column=0, sticky="ew", pady=(10, 0))
-        ttk.Button(btns, text="💾  Сохранить лимиты", style="Accent.TButton",
-                   command=self.save_limits).pack(side="left")
-        ttk.Button(btns, text="↺", style="Small.TButton", width=3,
-                   command=self._load_into_fields).pack(side="left", padx=6)
+        # лимиты живут в переменных; сами поля — в окне «⚙ Лимиты» (open_settings)
+        self.fields = {key: tk.StringVar(value=default) for key, _l, default in LIMITS}
 
-        # ── кошельки ──
+        # ── кошельки (на всю ширину; лимиты уехали в попап, лог получил место) ──
         wf = ttk.Labelframe(root, text="  КОШЕЛЬКИ В КОПИ (Core-реал)  ", padding=12)
-        wf.grid(row=2, column=1, sticky="nsew", padx=(6, 0))
+        wf.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
         wf.columnconfigure(0, weight=1)
         wf.rowconfigure(1, weight=1)
         add = ttk.Frame(wf, style="Card.TFrame")
@@ -354,6 +338,40 @@ class App(tk.Tk):
         self._log_raw("Пульт готов. Выбери режим и нажми «Запустить».", "cyan")
         self._log_raw("dry = ничего не тратит (тест) · smoke = 1 живая сделка · "
                       "live = реальные деньги.", "muted")
+
+    # ── окно «⚙ Лимиты»: поля настроек в отдельном попапе (в главном окне их место занял лог) ──
+    def open_settings(self):
+        win = getattr(self, "_settings_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift(); win.focus_force(); return
+        win = tk.Toplevel(self); self._settings_win = win
+        win.title("Лимиты и ставка")
+        win.configure(bg=PANEL)
+        win.transient(self)
+        win.resizable(False, False)
+        lf = ttk.Labelframe(win, text="  ЛИМИТЫ И СТАВКА  ", padding=14)
+        lf.pack(fill="both", expand=True, padx=12, pady=12)
+        lf.columnconfigure(0, weight=1)
+        for i, (key, label, _d) in enumerate(LIMITS):
+            row = ttk.Frame(lf, style="Card.TFrame")
+            row.grid(row=i, column=0, sticky="ew", pady=3)
+            row.columnconfigure(0, weight=1)
+            ttk.Label(row, text=label, style="Field.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Entry(row, textvariable=self.fields[key], width=8, justify="right").grid(
+                row=0, column=1, sticky="e", padx=(12, 0))
+        btns = ttk.Frame(lf, style="Card.TFrame")
+        btns.grid(row=len(LIMITS), column=0, sticky="ew", pady=(12, 0))
+        ttk.Button(btns, text="💾  Сохранить", style="Accent.TButton",
+                   command=self._save_and_close).pack(side="left")
+        ttk.Button(btns, text="↺ сбросить", style="Small.TButton",
+                   command=self._load_into_fields).pack(side="left", padx=6)
+
+    def _save_and_close(self):
+        if self.save_limits() and getattr(self, "_settings_win", None):
+            try:
+                self._settings_win.destroy()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ── вкладка «Теневой $15k»: тот же бот на виртуальный банк, реальные кэфы ──
     def _build_paper(self, root):
