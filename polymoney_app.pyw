@@ -35,6 +35,7 @@ HERE = Path(__file__).resolve().parent
 ENV = HERE / "polymarket.env"
 ENV_EXAMPLE = HERE / "polymarket.env.example"
 STATE = HERE / "live_exec_state.json"
+PAPER = HERE / "paper15k_state.json"           # состояние теневого бота (equity/pnl/pos)
 SETTINGS = HERE / "app_settings.json"          # {server, pw} — локально, в gitignore
 BOT = HERE / "live_executor.py"
 ALLOW_FILE = HERE / "copy_allowlist.json"      # белый список бота — держим в синхроне с копи
@@ -144,6 +145,7 @@ class App(tk.Tk):
         self.geometry("1000x760")
         self.minsize(880, 640)
         self.proc = None
+        self.paper_proc = None     # теневой (paper) бот — отдельный процесс
         self.q = queue.Queue()
         self.wallet_rows = {}      # iid -> {"addr":..., "paused":bool}
         self._client = None        # SDK-клиент для баланса (создаётся лениво по ключу, локально)
@@ -160,6 +162,7 @@ class App(tk.Tk):
         # первая загрузка кошельков + баланса (не блокируя старт окна)
         self.after(300, lambda: self.refresh_wallets(quiet=True))
         self.after(700, self._poll_account)
+        self.after(900, self._refresh_paper_stats)
 
     # ── стили ──
     def _style(self):
@@ -198,6 +201,11 @@ class App(tk.Tk):
         st.configure("TLabelframe", background=PANEL, bordercolor=BORD, borderwidth=1)
         st.configure("TLabelframe.Label", background=PANEL, foreground=ACC,
                      font=("Segoe UI", 10, "bold"))
+        st.configure("TNotebook", background=BG, borderwidth=0)
+        st.configure("TNotebook.Tab", background=CARD, foreground=MUT, borderwidth=0,
+                     padding=(18, 9), font=("Segoe UI", 10, "bold"))
+        st.map("TNotebook.Tab", background=[("selected", PANEL)],
+               foreground=[("selected", ACC)])
         st.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=TXT,
                      borderwidth=0, rowheight=26, font=("Segoe UI", 9))
         st.configure("Treeview.Heading", background=PANEL, foreground=MUT,
@@ -226,18 +234,24 @@ class App(tk.Tk):
 
     # ── разметка ──
     def _build(self):
-        root = ttk.Frame(self, padding=14)
-        root.pack(fill="both", expand=True)
+        outer = ttk.Frame(self, padding=(12, 10))
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="◉ POLYMONEY", style="Title.TLabel").pack(anchor="w", pady=(0, 6))
+        self.nb = ttk.Notebook(outer)
+        self.nb.pack(fill="both", expand=True)
+        real = ttk.Frame(self.nb, padding=10)
+        paper = ttk.Frame(self.nb, padding=10)
+        self.nb.add(real, text="  💰 Реал  ")
+        self.nb.add(paper, text="  🌗 Теневой $15k  ")
+        self._build_real(real)
+        self._build_paper(paper)
+
+    def _build_real(self, root):
         root.columnconfigure(0, weight=1, uniform="c")
         root.columnconfigure(1, weight=1, uniform="c")
         root.rowconfigure(3, weight=1)
-
-        # header
-        head = ttk.Frame(root)
-        head.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
-        ttk.Label(head, text="◉ POLYMONEY", style="Title.TLabel").pack(side="left")
-        ttk.Label(head, text="  пульт реального копи-бота", style="Sub.TLabel").pack(
-            side="left", pady=(8, 0))
+        ttk.Label(root, text="реальный счёт — живые деньги", style="Sub.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         # ── панель управления ботом ──
         bar = ttk.Frame(root, style="Card.TFrame", padding=12)
@@ -341,6 +355,54 @@ class App(tk.Tk):
         self._log_raw("dry = ничего не тратит (тест) · smoke = 1 живая сделка · "
                       "live = реальные деньги.", "muted")
 
+    # ── вкладка «Теневой $15k»: тот же бот на виртуальный банк, реальные кэфы ──
+    def _build_paper(self, root):
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(2, weight=1)
+        bar = ttk.Frame(root, style="Card.TFrame", padding=12)
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        self.pstart_btn = ttk.Button(bar, text="▶  Запустить теневой", style="Accent.TButton",
+                                     command=self.toggle_paper)
+        self.pstart_btn.pack(side="left")
+        self.pdot = tk.Canvas(bar, width=14, height=14, bg=PANEL, highlightthickness=0)
+        self.pdot.pack(side="left", padx=(16, 6))
+        self._pdot_id = self.pdot.create_oval(2, 2, 12, 12, fill=MUT, outline="")
+        self.pstat_lbl = ttk.Label(bar, text="остановлен", style="Stat.TLabel")
+        self.pstat_lbl.pack(side="left")
+        ttk.Label(bar, text="  · та же логика/задержки/кэфы, банк $15k, БЕЗ денег",
+                  style="Card.TLabel").pack(side="left")
+
+        sc = ttk.Labelframe(root, text="  ТЕНЕВОЙ СЧЁТ $15k  ", padding=14)
+        sc.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        for i in range(6):
+            sc.columnconfigure(i, weight=1)
+        self.pcards = {}
+        for i, (key, cap) in enumerate([("equity", "Банк $"), ("pnl", "PnL $"), ("roi", "ROI %"),
+                                        ("realized", "Реализ $"), ("pos", "Позиций"), ("trades", "Сделок")]):
+            ttk.Label(sc, text=cap, style="Field.TLabel").grid(row=0, column=i, sticky="w", padx=(0, 12))
+            lbl = ttk.Label(sc, text="—", style="Money.TLabel")
+            lbl.grid(row=1, column=i, sticky="w", padx=(0, 12))
+            self.pcards[key] = lbl
+        self.pupd_lbl = ttk.Label(sc, text="ещё не запускался", style="Field.TLabel")
+        self.pupd_lbl.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
+
+        logf = ttk.Labelframe(root, text="  ЛОГ ТЕНЕВОГО  ", padding=(10, 8))
+        logf.grid(row=2, column=0, sticky="nsew")
+        logf.columnconfigure(0, weight=1)
+        logf.rowconfigure(0, weight=1)
+        self.plog = tk.Text(logf, bg=CARD, fg=TXT, insertbackground=TXT, relief="flat",
+                            font=("Consolas", 10), padx=10, pady=8, wrap="word",
+                            highlightthickness=0, state="disabled")
+        self.plog.grid(row=0, column=0, sticky="nsew")
+        psb = ttk.Scrollbar(logf, command=self.plog.yview)
+        psb.grid(row=0, column=1, sticky="ns")
+        self.plog["yscrollcommand"] = psb.set
+        for tag, col in (("green", GRN), ("red", RED), ("amber", AMB),
+                         ("cyan", ACC), ("muted", MUT), ("text", TXT)):
+            self.plog.tag_configure(tag, foreground=col)
+        self._log_raw("Теневой бот: те же кошельки на виртуальный $15k. Жми «Запустить».",
+                      "cyan", self.plog)
+
     # ───────────────────── env поля ─────────────────────
     def _load_into_fields(self):
         cfg = read_env()
@@ -417,11 +479,53 @@ class App(tk.Tk):
             messagebox.showerror("Не запустилось", str(ex))
             self.proc = None
             return
-        threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
+        threading.Thread(target=self._reader, args=(self.proc, "real"), daemon=True).start()
         self.start_btn.config(text="■  Остановить", style="Stop.TButton")
         self.mode_cb.config(state="disabled")
         self._set_dot(GRN if mode == "live" else ACC, f"работает · {mode}")
         self._log_raw(f"▶ Бот запущен в режиме {mode.upper()}.", "cyan")
+
+    # ── теневой (paper) бот: тот же процесс с MODE=paper, виртуальный $15k ──
+    def toggle_paper(self):
+        if self.paper_proc:
+            self.stop_paper()
+        else:
+            self.start_paper()
+
+    def start_paper(self):
+        if not BOT.exists():
+            return
+        self.save_limits(silent=True)                # общие лимиты (цена/возраст) — и теневому
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["MODE"] = "paper"                        # переопределяет MODE из файла для ЭТОГО процесса
+        flags = 0x08000000 if os.name == "nt" else 0
+        try:
+            self.paper_proc = subprocess.Popen(
+                [sys.executable, str(BOT)], cwd=str(HERE),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                creationflags=flags, text=True, encoding="utf-8", errors="replace", bufsize=1)
+        except Exception as ex:  # noqa: BLE001
+            messagebox.showerror("Не запустилось", str(ex))
+            self.paper_proc = None
+            return
+        threading.Thread(target=self._reader, args=(self.paper_proc, "paper"), daemon=True).start()
+        self.pstart_btn.config(text="■  Остановить теневой", style="Stop.TButton")
+        self.pdot.itemconfig(self._pdot_id, fill=ACC)
+        self.pstat_lbl.config(text="работает")
+        self._log_raw("▶ Теневой бот запущен (виртуальный $15k, реальные кэфы).", "cyan", self.plog)
+
+    def stop_paper(self):
+        if self.paper_proc:
+            try:
+                self.paper_proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        self.paper_proc = None
+        self.pstart_btn.config(text="▶  Запустить теневой", style="Accent.TButton")
+        self.pdot.itemconfig(self._pdot_id, fill=MUT)
+        self.pstat_lbl.config(text="остановлен")
+        self._log_raw("■ Теневой бот остановлен.", "muted", self.plog)
 
     def stop_bot(self):
         if self.proc:
@@ -435,30 +539,33 @@ class App(tk.Tk):
         self._set_dot(MUT, "остановлен")
         self._log_raw("■ Бот остановлен.", "muted")
 
-    def _reader(self, proc):
+    def _reader(self, proc, src):
         try:
             for line in proc.stdout:
-                self.q.put(line)
+                self.q.put((src, line))
         except Exception:  # noqa: BLE001
             pass
-        self.q.put(None)               # сигнал: процесс завершился
+        self.q.put((src, None))        # сигнал: процесс завершился
 
     def _pump(self):
         try:
             while True:
-                line = self.q.get_nowait()
+                src, line = self.q.get_nowait()
                 if line is None:
-                    if self.proc:      # завершился сам (не по кнопке)
+                    if src == "paper" and self.paper_proc:
+                        self._log_raw("⚠ Теневой завершился.", "amber", self.plog)
+                        self.stop_paper()
+                    elif src == "real" and self.proc:
                         self._log_raw("⚠ Бот завершился.", "amber")
                         self.stop_bot()
                 else:
-                    self._log(line)
+                    self._log(line, self.plog if src == "paper" else None)
         except queue.Empty:
             pass
         self.after(150, self._pump)
 
     # ───────────────────── лог ─────────────────────
-    def _log(self, line: str):
+    def _log(self, line, w=None):
         line = line.rstrip("\n").rstrip("\r")
         if not line.strip():
             return
@@ -479,18 +586,18 @@ class App(tk.Tk):
             tag, icon = "amber", "⏸"
         else:
             tag, icon = "text", " "
-        self._log_raw(f"{icon} {line.strip()}", tag)
+        self._log_raw(f"{icon} {line.strip()}", tag, w)
 
-    def _log_raw(self, text: str, tag="text"):
+    def _log_raw(self, text, tag="text", w=None):
+        w = w if w is not None else self.log
         ts = time.strftime("%H:%M:%S")
-        self.log.config(state="normal")
-        self.log.insert("end", f"{ts}  ", "muted")
-        self.log.insert("end", text + "\n", tag)
-        # держим лог компактным
-        if int(self.log.index("end-1c").split(".")[0]) > 800:
-            self.log.delete("1.0", "200.0")
-        self.log.see("end")
-        self.log.config(state="disabled")
+        w.config(state="normal")
+        w.insert("end", f"{ts}  ", "muted")
+        w.insert("end", text + "\n", tag)
+        if int(w.index("end-1c").split(".")[0]) > 800:   # держим лог компактным
+            w.delete("1.0", "200.0")
+        w.see("end")
+        w.config(state="disabled")
 
     def _clear_log(self):
         self.log.config(state="normal")
@@ -506,6 +613,24 @@ class App(tk.Tk):
         except Exception:  # noqa: BLE001
             pass
         self.after(3000, self._refresh_status)
+
+    def _refresh_paper_stats(self):
+        try:
+            if PAPER.exists():
+                p = json.loads(PAPER.read_text(encoding="utf-8"))
+                self.pcards["equity"].config(text=f"{p.get('equity', p.get('bankroll', 0)):,.0f}")
+                self.pcards["pnl"].config(text=f"{p.get('pnl', 0):+,.0f}")
+                self.pcards["roi"].config(text=f"{p.get('roi', 0):+.1f}")
+                self.pcards["realized"].config(text=f"{p.get('realized', 0):+,.0f}")
+                self.pcards["pos"].config(text=f"{len(p.get('pos', {}))}")
+                self.pcards["trades"].config(text=f"{p.get('buys', 0)}/{p.get('sells', 0)}")
+                ts = p.get("ts", 0)
+                ago = int(time.time()) - ts if ts else 0
+                self.pupd_lbl.config(text=(f"обновлено {ago} сек назад" if ts else "ещё не запускался")
+                                     + f"  ·  старт ${p.get('bankroll', 0):,.0f}")
+        except Exception:  # noqa: BLE001
+            pass
+        self.after(3000, self._refresh_paper_stats)
 
     def _set_dot(self, color, text):
         self.dot.itemconfig(self._dot_id, fill=color)
@@ -702,10 +827,11 @@ class App(tk.Tk):
         self.refresh_wallets()
 
     def _on_close(self):
-        if self.proc and not messagebox.askyesno(
-                "Бот работает", "Бот ещё запущен. Остановить и выйти?"):
+        if (self.proc or self.paper_proc) and not messagebox.askyesno(
+                "Боты работают", "Бот(ы) ещё запущены. Остановить и выйти?"):
             return
         self.stop_bot()
+        self.stop_paper()
         if self._client is not None:
             try:
                 self._client.close()

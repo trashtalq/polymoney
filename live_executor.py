@@ -526,6 +526,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
         if paper:                                    # теневой отчёт: виртуальный банк и PnL
             eq, pnl = paper_equity(pstate, client.api)
             roi = pnl / pstate["bankroll"] * 100 if pstate["bankroll"] else 0
+            pstate["equity"], pstate["pnl"], pstate["roi"] = eq, pnl, round(roi, 2)
+            pstate["ts"] = int(time.time())          # чтобы пульт читал свежесть/цифры из файла
             print(f"  [PAPER] банк ${eq:,.0f} (старт ${pstate['bankroll']:,.0f}) | PnL {pnl:+,.0f}$ "
                   f"({roi:+.1f}%) | реализ {pstate['realized']:+,.0f}$ | позиций {len(pstate['pos'])} "
                   f"| кэш ${pstate['cash']:,.0f} | сделок {pstate['buys']}/{pstate['sells']}", flush=True)
