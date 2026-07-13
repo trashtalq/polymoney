@@ -36,6 +36,7 @@ ENV = HERE / "polymarket.env"
 ENV_EXAMPLE = HERE / "polymarket.env.example"
 STATE = HERE / "live_exec_state.json"
 PAPER = HERE / "paper15k_state.json"           # состояние теневого бота (equity/pnl/pos)
+UPTIME_FILE = HERE / "paper_uptime.json"       # накопленное время работы теневого (переживает рестарты)
 SETTINGS = HERE / "app_settings.json"          # {server, pw} — локально, в gitignore
 BOT = HERE / "live_executor.py"
 ALLOW_FILE = HERE / "copy_allowlist.json"      # белый список бота — держим в синхроне с копи
@@ -159,7 +160,9 @@ class App(tk.Tk):
         self.minsize(880, 640)
         self.proc = None
         self.paper_proc = None     # теневой (paper) бот — отдельный процесс
-        self.paper_started = None   # когда запущен теневой (для таймера работы)
+        self.paper_started = None   # старт ТЕКУЩЕЙ сессии теневого (None = стоит)
+        self.paper_uptime = self._load_uptime()   # накопленное время работы за всё время (сек)
+        self._uptime_save_t = 0
         self.q = queue.Queue()
         self.wallet_rows = {}      # iid -> {"addr":..., "paused":bool}
         self._client = None        # SDK-клиент для баланса (создаётся лениво по ключу, локально)
@@ -586,12 +589,14 @@ class App(tk.Tk):
             except Exception:  # noqa: BLE001
                 pass
         self.paper_proc = None
-        if self.paper_started:                       # финальное время работы в лог
-            self._log_raw(f"■ Теневой остановлен. Проработал {self._fmt_dur(time.time() - self.paper_started)}.",
+        if self.paper_started:                       # КОММИТИМ время сессии в накопленное
+            self.paper_uptime += time.time() - self.paper_started
+            self.paper_started = None
+            self._save_uptime(self.paper_uptime)
+            self._log_raw(f"■ Теневой остановлен. Всего наработано {self._fmt_dur(self.paper_uptime)}.",
                           "muted", self.plog)
         else:
             self._log_raw("■ Теневой бот остановлен.", "muted", self.plog)
-        self.paper_started = None                     # стоп таймера (замирает на последнем значении)
         self.pstart_btn.config(text="▶  Запустить теневой", style="Accent.TButton")
         self.pdot.itemconfig(self._pdot_id, fill=MUT)
         self.pstat_lbl.config(text="остановлен")
@@ -601,9 +606,25 @@ class App(tk.Tk):
         sec = int(sec); h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
 
+    def _load_uptime(self):
+        try:
+            return int(json.loads(UPTIME_FILE.read_text(encoding="utf-8")).get("total", 0))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _save_uptime(self, total):
+        try:
+            UPTIME_FILE.write_text(json.dumps({"total": int(total)}), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _tick_paper_timer(self):
-        if self.paper_started:
-            self.puptime_lbl.config(text=f"⏱ {self._fmt_dur(time.time() - self.paper_started)}")
+        live = (time.time() - self.paper_started) if self.paper_started else 0
+        total = self.paper_uptime + live             # накопленное + текущая сессия
+        self.puptime_lbl.config(text=f"⏱ {self._fmt_dur(total)}")
+        if self.paper_started and time.time() - self._uptime_save_t > 10:
+            self._save_uptime(total)                 # периодически на диск (переживёт краш пульта)
+            self._uptime_save_t = time.time()
         self.after(1000, self._tick_paper_timer)
 
     def stop_bot(self):

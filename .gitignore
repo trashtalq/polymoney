@@ -58,6 +58,10 @@ core_book.json
 book_*.json
 groups.json
 
+# теневой (paper) бот: состояние и накопленное время работы (локально)
+paper15k_state.json
+paper_uptime.json
+
 # event store глобальной ленты сделок (сервер-owned, растёт)
 trades.db
 trades.db-wal
