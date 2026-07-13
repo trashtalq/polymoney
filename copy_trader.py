@@ -122,9 +122,22 @@ ESPORTS_KW = (
     "win 2-0", "win 2-1", "win 3-0", "win 3-1", "win 3-2", " map 1", " map 2", " map 3",
 )
 
+# ДНЕВНОЙ ЦЕНОВОЙ ШУМ (2026-07-13): индекс/крипто «вверх-вниз/цена на дату» — рулетка без эджа,
+# слив реала. Ловим направленные/диапазонные дейли-рынки (SPY/SPX/BTC «up or down», «between $»).
+PRICE_NOISE_KW = (
+    "up or down", "opens up or down", "(spy)", "(spx)", "s&p 500", "nasdaq", "dow jones",
+    "be between $", "closes above", "closes below", "close above", "close below",
+)
+
+# ТЕННИС/КРИКЕТ — добор к спорт-фильтру (просачивались: Wimbledon, крикет).
+SPORT_EXTRA_KW = (
+    "wimbledon", "roland garros", "australian open", "us open", " atp ", " wta ",
+    "grand slam", "cricket", " odi ", " t20", "ipl ", "wickets", " test match",
+)
+
 
 def _blocked_reason(title: str):
-    """Возвращает 'tweets'/'zelensky'/'esports'/'sport'/'weather' если рынок не копируем, иначе None."""
+    """Не копируем: tweets/zelensky/esports/price-noise/sport/weather -> причина; иначе None."""
     t = (title or "").lower()
     if _is_tweet_count(t):
         return "tweets"                                # твит-каунт-корзины: категория без эджа
@@ -132,7 +145,9 @@ def _blocked_reason(title: str):
         return "zelensky"                             # посты/твиты Зеленского — та же лотерея, что твит-каунт
     if any(k in t for k in ESPORTS_KW):
         return "esports"                              # киберспорт
-    if any(k in t for k in SPORT_MARKET_KW):
+    if any(k in t for k in PRICE_NOISE_KW):
+        return "price-noise"                          # дневной индекс/крипто «вверх-вниз/цена»
+    if any(k in t for k in SPORT_MARKET_KW) or any(k in t for k in SPORT_EXTRA_KW):
         if _is_mention(t):
             return None                                # mention-рынок: спорт-фильтр не про него
         return "sport"

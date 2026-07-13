@@ -175,7 +175,7 @@ def resp_ok(resp):
 
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
              max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
-             signals_token=""):
+             signals_token="", min_price=0.12):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -277,6 +277,11 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 continue
             if px <= 0 or px > max_price:
                 print(f"  skip (цена {px} вне 0..{max_price}): {title}", flush=True)
+                state["done"].append(k)
+                continue
+            if px < min_price:                        # дешёвый лонгшот: копи-лаг + дисперсия съедают
+                print(f"  skip (лонгшот {px} < мин {min_price} — не берём дешёвые лотереи): {title}",
+                      flush=True)
                 state["done"].append(k)
                 continue
             if max_resolve_days:                      # рынок резолвится слишком поздно -> капитал застрянет
@@ -434,6 +439,7 @@ def main():
     per_trade = float(cfg.get("PER_TRADE_USD") or 1)
     daily_max = float(cfg.get("DAILY_MAX_USD") or 20)
     max_price = float(cfg.get("MAX_PRICE") or 0.92)
+    min_price = float(cfg.get("MIN_PRICE") or 0.12)   # не берём дешёвые лонгшоты (лаг+дисперсия жрут реал)
     poll = int(cfg.get("POLL_SEC") or 30)
     max_age = int(cfg.get("MAX_AGE_SEC") or 300)     # старше — не копируем (цена уехала)
     max_entries = int(cfg.get("MAX_ENTRIES_PER_POS") or 2)   # не больше N входов в одну позу
@@ -445,14 +451,16 @@ def main():
 
     rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
     print(f"=== live_executor | MODE={mode.upper()} | лимит-в-позах ${deposit} | ставка ${per_trade} | "
-          f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | резолв {rezolv} | "
-          f"до {max_entries}x в позу | ВЫХОДЫ вслед за целью (>={exit_min_frac:g}) ===", flush=True)
+          f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | цена {min_price:g}-{max_price:g} | "
+          f"резолв {rezolv} | до {max_entries}x в позу | ВЫХОДЫ вслед за целью (>={exit_min_frac:g}) ===",
+          flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
 
     if mode == "dry":
         run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
                  max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet, max_resolve_days,
-                 exit_min_frac, signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip())
+                 exit_min_frac, signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(),
+                 min_price=min_price)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -479,7 +487,7 @@ def main():
     with client:                                     # SDK-клиент как контекст (сессия/очистка)
         run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
                  max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
-                 signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip())
+                 signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=min_price)
 
 
 if __name__ == "__main__":
