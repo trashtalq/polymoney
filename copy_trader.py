@@ -562,8 +562,25 @@ def load_book(path: str, bankroll: float) -> dict:
             "thold": {}, "log": []}
 
 
+def atomic_write_text(path, text: str) -> None:
+    """Атомарная запись: сначала во временный файл рядом, потом os.replace (подмена атомарна).
+    Обрыв/падение процесса в момент записи НЕ оставляет битого файла — старый цел, недописанное
+    остаётся в *.tmp. На Windows подмену может на миг держать читатель/антивирус — пара повторов."""
+    p = Path(path)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    for attempt in range(3):
+        try:
+            os.replace(tmp, p)
+            return
+        except PermissionError:
+            if attempt == 2:
+                raise
+            time.sleep(0.2)
+
+
 def save_book(path: str, book: dict) -> None:
-    Path(path).write_text(json.dumps(book, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(book, ensure_ascii=False, indent=2))
 
 
 # ----------------------------- операции копи -----------------------------

@@ -86,7 +86,8 @@ def load_env():
     cfg.update({k: v for k, v in os.environ.items() if k in (
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
-        "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS", "EXIT_MIN_FRAC")})
+        "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS", "EXIT_MIN_FRAC",
+        "SIGNALS_TOKEN")})
     return cfg
 
 
@@ -97,7 +98,11 @@ def st_load():
 
 
 def st_save(s):
-    STATE_FILE.write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
+    # атомарно (tmp + replace): обрыв в момент записи не бьёт файл «что уже исполнено» —
+    # его порча означала бы ПОВТОРНЫЕ покупки уже отработанных сигналов
+    tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, STATE_FILE)
 
 
 def sig_key(sig):
@@ -169,9 +174,12 @@ def resp_ok(resp):
 
 
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-             max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac):
+             max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
+             signals_token=""):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
+        s.headers["X-Signals-Token"] = signals_token
     seed_allowlist(s, server, group)                  # белый список из текущего ядра, если ещё нет
     state = st_load()
     state.setdefault("spent_by_wallet", {})           # адрес цели -> $ потрачено за день (fallback для dry)
@@ -208,6 +216,11 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
         except Exception as ex:  # noqa: BLE001
             print(f"[{time.strftime('%H:%M:%S')}] сервер недоступен ({ex})", flush=True)
             time.sleep(poll)
+            continue
+        if r.get("error"):                            # сервер отверг запрос (напр. нет/неверный
+            print(f"[{time.strftime('%H:%M:%S')}] !! сервер отказал: {r['error']} — "
+                  f"проверь SIGNALS_TOKEN в polymarket.env (должен совпадать с серверным)", flush=True)
+            time.sleep(poll)                          # SIGNALS_TOKEN) — НЕ молчим, иначе бот «ослеп»
             continue
         if r.get("paused"):
             print(f"[{time.strftime('%H:%M:%S')}] копирование на ПАУЗЕ — ждём", flush=True)
@@ -433,7 +446,7 @@ def main():
     if mode == "dry":
         run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
                  max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet, max_resolve_days,
-                 exit_min_frac)
+                 exit_min_frac, signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip())
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -459,7 +472,8 @@ def main():
     print(f"кошелёк-депозит: {funder}", flush=True)
     with client:                                     # SDK-клиент как контекст (сессия/очистка)
         run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
-                 max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac)
+                 max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
+                 signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip())
 
 
 if __name__ == "__main__":

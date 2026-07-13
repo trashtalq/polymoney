@@ -18,6 +18,7 @@ copy_dashboard.py — ВЕБ-ДАШБОРД для бумажного копи (
 import argparse
 import copy
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -40,6 +41,12 @@ ADMIN_HASH = (hashlib.sha256(os.environ["ADMIN_PASS"].encode("utf-8")).hexdigest
               if os.environ.get("ADMIN_PASS") else None)
 
 _AUTH_FAILS = {}          # ip -> [неудач, ts_первой] — троттлинг брутфорса пароля
+
+# Токен ленты сигналов (/api/signals). Задан на сервере (env, из .env) -> лента отдаётся только
+# с этим токеном (заголовок X-Signals-Token или ?token=): по ней живёт реальный бот, и открытая
+# лента = бесплатная раздача альфы любому, кто нашёл порт (он ещё и фронт-ранит наши же входы).
+# НЕ задан -> лента открыта (обратная совместимость, ничего не ломается до настройки).
+SIGNALS_TOKEN = os.environ.get("SIGNALS_TOKEN", "")
 
 
 def _admin_denied(data):
@@ -1523,12 +1530,12 @@ def api_remove_wallet():
     before = len(d.get("watchlist", []))
     d["watchlist"] = [w for w in d.get("watchlist", []) if w.lower() != addr]
     d["count"] = len(d["watchlist"])
-    path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    ct.atomic_write_text(path, json.dumps(d, ensure_ascii=False, indent=2))
     try:                                                       # пометка в источниках (для истории)
         sp = Path("wallet_sources.json")
         s = json.loads(sp.read_text(encoding="utf-8"))
         s[addr] = "удалён-вручную"
-        sp.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+        ct.atomic_write_text(sp, json.dumps(s, ensure_ascii=False, indent=2))
     except Exception:  # noqa: BLE001
         pass
     with _lock:
@@ -1678,7 +1685,7 @@ def api_create_group():
     hard = bool(data.get("hard_cash"))
     reg.append({"id": gid, "name": name, "label": label,
                 "bankroll": bankroll, "hard_cash": hard})
-    Path("groups.json").write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+    ct.atomic_write_text(Path("groups.json"), json.dumps(reg, ensure_ascii=False, indent=1))
     with _lock:
         _start_group(gid, label, bankroll, hard)
     return jsonify({"ok": True, "id": gid, "name": name, "label": label,
@@ -1697,7 +1704,7 @@ def api_delete_group():
     if gid in ("main", "core", "real") or not gid:
         return jsonify({"ok": False, "error": "bad id"}), 400
     reg = [g for g in _groups_registry() if g["id"] != gid]
-    Path("groups.json").write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+    ct.atomic_write_text(Path("groups.json"), json.dumps(reg, ensure_ascii=False, indent=1))
     STATE[f"stop_{gid}"] = True                       # поток завершится на след. цикле сам
     return jsonify({"ok": True, "id": gid})
 
@@ -1722,7 +1729,7 @@ def api_wallet_pause():
         cur.add(addr)
     else:
         cur.discard(addr)
-    p.write_text(json.dumps(sorted(cur), ensure_ascii=False, indent=1), encoding="utf-8")
+    ct.atomic_write_text(p, json.dumps(sorted(cur), ensure_ascii=False, indent=1))
     return jsonify({"ok": True, "wallet": addr, "paused": bool(data.get("paused")), "n_paused": len(cur)})
 
 
@@ -1750,7 +1757,7 @@ def api_wallet_filters():
         cfg[addr] = sorted(off)
     else:
         cfg.pop(addr, None)
-    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), encoding="utf-8")
+    ct.atomic_write_text(p, json.dumps(cfg, ensure_ascii=False, indent=1))
     return jsonify({"ok": True, "wallet": addr, "off": sorted(off)})
 
 
@@ -1777,7 +1784,7 @@ def api_set_source():
         if w.startswith("0x") and len(w) == 42 and label:
             srcs[w] = str(label)[:40]
             n += 1
-    sp.write_text(json.dumps(srcs, ensure_ascii=False, indent=2), encoding="utf-8")
+    ct.atomic_write_text(sp, json.dumps(srcs, ensure_ascii=False, indent=2))
     return jsonify({"ok": True, "updated": n})
 
 
@@ -1823,7 +1830,7 @@ def api_set_real_account():
     addr = (data.get("address", "") or "").lower().strip()
     if not (addr.startswith("0x") and len(addr) == 42):
         return jsonify({"ok": False, "error": "bad address"}), 400
-    Path("real_account.json").write_text(json.dumps({"address": addr}), encoding="utf-8")
+    ct.atomic_write_text(Path("real_account.json"), json.dumps({"address": addr}))
     _REAL["t"] = 0.0
     return jsonify({"ok": True, "address": addr})
 
@@ -1943,6 +1950,10 @@ def api_signals():
     (2) wallets=addr1,addr2,… — лента ТОЛЬКО по этим кошелькам из ОСНОВНОЙ книги (в ней все
         watchlist-кошельки). Так пульт задаёт копи-набор своим локальным allowlist — без правки
         серверных списков. Поля: t, w, tok, cid, px, spend, out, title."""
+    if SIGNALS_TOKEN:                                  # лента закрыта токеном (см. константу выше)
+        got = request.headers.get("X-Signals-Token", "") or request.args.get("token", "") or ""
+        if not hmac.compare_digest(got, SIGNALS_TOKEN):
+            return jsonify({"ok": False, "error": "signals token required"}), 401
     since = int(request.args.get("since", 0) or 0)
     wl_param = (request.args.get("wallets") or "").strip()
     if wl_param:                                       # лента по явному списку кошельков (из main)
@@ -2103,7 +2114,7 @@ def api_add_wallet():
            if w not in have and (force or w not in deleted)]
     d["watchlist"].extend(new)
     d["count"] = len(d["watchlist"])
-    path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    ct.atomic_write_text(path, json.dumps(d, ensure_ascii=False, indent=2))
     label = (data.get("source") or "добавлен-вручную")[:40]
     # relabel=true -> ПЕРЕНОС уже существующих в этот список (смена ярлыка), напр. main -> core-реал.
     # Без флага дупы НЕ трогаем — иначе пуш сканера мог бы случайно перекинуть кошелёк из ядра.
@@ -2113,7 +2124,7 @@ def api_add_wallet():
     for w in new + relabel:
         srcs[w] = label
     try:
-        sp.write_text(json.dumps(srcs, ensure_ascii=False, indent=2), encoding="utf-8")
+        ct.atomic_write_text(sp, json.dumps(srcs, ensure_ascii=False, indent=2))
     except Exception:  # noqa: BLE001
         pass
     try:                                                       # вечный журнал добавлений (когорты)
@@ -2334,7 +2345,12 @@ def main():
     print(f"дашборд: http://localhost:{args.port}  | целей {len(wallets)}, опрос каждые {args.interval}s")
     print(f"core-группа: депозит ${core_bankroll:,.0f} (жёсткий), книга {core_state}")
     print("первый цикл зафиксирует старт (копирование со второго). Ctrl+C для остановки.")
-    app.run(host=args.host, port=args.port, threaded=True)
+    try:
+        from waitress import serve                   # прод-сервер: dev-сервер Flask не для интернета
+        serve(app, host=args.host, port=args.port, threads=12)
+    except ImportError:
+        print("waitress не установлен (pip install waitress) — запускаю dev-сервер Flask", flush=True)
+        app.run(host=args.host, port=args.port, threaded=True)
 
 
 if __name__ == "__main__":

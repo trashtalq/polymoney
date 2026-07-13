@@ -2,6 +2,13 @@
 .wallet_cache/
 deploy_bundle/
 __pycache__/
+.idea/
+*.tmp                          # недописанные атомарные записи (atomic_write_text)
+Polymoney_*.pdf
+Polymoney_*.pptx
+
+# книга main — состояние сервера, в репо ей не место (история от неё пухнет мегабайтами)
+paper_book.json
 wide*.jsonl
 wide*.jsonl.candidates.json
 wide*_registry.json

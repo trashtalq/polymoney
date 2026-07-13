@@ -15,6 +15,10 @@ services:
       # На сервере: echo "ADMIN_PASS=<длинный-случайный>" > /root/polymoney/.env   (docker compose
       # автоматически подхватывает .env из папки рядом). Потом docker compose up -d --force-recreate.
       ADMIN_PASS: "${ADMIN_PASS:-}"
+      # Токен ленты сигналов (/api/signals): задай в том же серверном .env (SIGNALS_TOKEN=<случайный>),
+      # и лента закроется от посторонних (по ней живёт реальный бот — открытая лента раздаёт альфу).
+      # Локальный исполнитель шлёт его из polymarket.env. Пусто = лента открыта (как раньше).
+      SIGNALS_TOKEN: "${SIGNALS_TOKEN:-}"
     ports:
       - "5000:5000"                  # открыт по http://IP:5000 (бумага, без ключей — ок)
     volumes:
