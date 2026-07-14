@@ -54,6 +54,16 @@ def load_allowlist() -> set:
     return _ALLOW["set"]
 
 
+def hold_only(paper=False) -> bool:
+    """Режим «ДЕРЖИМ»: новые входы на паузе, но выходы за целью работают и позиции доживают.
+    Горячий флаг (без рестарта): hold_only_paper.json / hold_only.json {"hold": true}."""
+    f = HERE / ("hold_only_paper.json" if paper else "hold_only.json")
+    try:
+        return bool(json.loads(f.read_text(encoding="utf-8")).get("hold"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def seed_allowlist(s, server, group):
     """Если файла нет — создаём из ТЕКУЩЕГО состава группы на сервере (доверие первого запуска).
     Дальше список НЕ обновляется автоматически: инъекция нового кошелька на сервер его не добавит."""
@@ -369,9 +379,16 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             state["spent_by_wallet"] = {}
 
         allow = load_allowlist()                      # белый список кошельков (перечитывается на лету)
+        holding = hold_only(paper)                     # горячий флаг «ДЕРЖИМ»: входы на паузе
+        if holding:
+            print(f"[{time.strftime('%H:%M:%S')}] режим ДЕРЖИМ: новые входы на паузе, "
+                  f"выходы за целью работают", flush=True)
         for sig in r.get("signals", []):
             k = sig_key(sig)
             state["last_t"] = max(state["last_t"], sig["t"])
+            if holding:                                # держим: НОВЫЕ входы не берём (не отыгрываем позже)
+                state["done"].append(k)
+                continue
             if k in state["done"]:
                 continue
             px = sig.get("px") or 0

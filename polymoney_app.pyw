@@ -37,6 +37,8 @@ ENV_EXAMPLE = HERE / "polymarket.env.example"
 STATE = HERE / "live_exec_state.json"
 PAPER = HERE / "paper15k_state.json"           # состояние теневого бота (equity/pnl/pos)
 UPTIME_FILE = HERE / "paper_uptime.json"       # накопленное время работы теневого (переживает рестарты)
+HOLD_FILE = HERE / "hold_only.json"            # реал: режим «держим» (стоп входов, выходы работают)
+HOLD_FILE_PAPER = HERE / "hold_only_paper.json"   # теневой: то же
 SETTINGS = HERE / "app_settings.json"          # {server, pw} — локально, в gitignore
 BOT = HERE / "live_executor.py"
 ALLOW_FILE = HERE / "copy_allowlist.json"      # белый список бота — держим в синхроне с копи
@@ -185,6 +187,8 @@ class App(tk.Tk):
         self.after(700, self._poll_account)
         self.after(900, self._refresh_paper_stats)
         self.after(1000, self._tick_paper_timer)
+        self._paint_hold(False)                     # начальное состояние кнопок «держим»
+        self._paint_hold(True)
         self.after(1100, self._poll_positions)
 
     # ── стили ──
@@ -297,6 +301,9 @@ class App(tk.Tk):
         self.stat_lbl.pack(side="left")
         ttk.Button(bar, text="⚙ Лимиты", style="Small.TButton",
                    command=self.open_settings).pack(side="left", padx=(16, 0))
+        self.hold_btn = ttk.Button(bar, text="⏸ Стоп входов (держим)", style="Small.TButton",
+                                   command=lambda: self._toggle_hold(False))
+        self.hold_btn.pack(side="left", padx=(8, 0))
         ttk.Label(bar, text="", style="Card.TLabel").pack(side="left", expand=True, fill="x")
         # ── баланс Polymarket: портфель (позиции+наличные) и «Доступно» (кэш, по ключу локально) ──
         money = ttk.Frame(bar, style="Card.TFrame")
@@ -419,8 +426,9 @@ class App(tk.Tk):
         self.pstat_lbl.pack(side="left")
         ttk.Button(bar, text="⚙ Настройки теневого", style="Small.TButton",
                    command=self.open_paper_settings).pack(side="left", padx=(16, 0))
-        ttk.Label(bar, text="  · реальные кэфы/задержки, БЕЗ денег",
-                  style="Card.TLabel").pack(side="left")
+        self.phold_btn = ttk.Button(bar, text="⏸ Стоп входов (держим)", style="Small.TButton",
+                                    command=lambda: self._toggle_hold(True))
+        self.phold_btn.pack(side="left", padx=(8, 0))
         self.puptime_lbl = ttk.Label(bar, text="⏱ 00:00:00", style="Money.TLabel")
         self.puptime_lbl.pack(side="right")
 
@@ -706,6 +714,33 @@ class App(tk.Tk):
             self._save_uptime(total)                 # периодически на диск (переживёт краш пульта)
             self._uptime_save_t = time.time()
         self.after(1000, self._tick_paper_timer)
+
+    # ── режим «ДЕРЖИМ»: стоп новых входов, выходы за целью работают (горячий флаг) ──
+    def _read_hold(self, paper):
+        f = HOLD_FILE_PAPER if paper else HOLD_FILE
+        try:
+            return bool(json.loads(f.read_text(encoding="utf-8")).get("hold"))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _paint_hold(self, paper):
+        holding = self._read_hold(paper)
+        btn = self.phold_btn if paper else self.hold_btn
+        btn.config(text=("▶ Возобновить входы" if holding else "⏸ Стоп входов (держим)"),
+                   style="Stop.TButton" if holding else "Small.TButton")
+
+    def _toggle_hold(self, paper):
+        new = not self._read_hold(paper)
+        f = HOLD_FILE_PAPER if paper else HOLD_FILE
+        try:
+            f.write_text(json.dumps({"hold": new}), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+        self._paint_hold(paper)
+        w = self.plog if paper else None
+        self._log_raw(("⏸ ДЕРЖИМ: новые входы на паузе, позиции доживают и закрываются вслед за целью."
+                       if new else "▶ Входы возобновлены."),
+                      "amber" if new else "green", w)
 
     def stop_bot(self):
         if self.proc:
