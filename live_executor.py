@@ -218,6 +218,40 @@ def paper_equity(p, api):
     return eq, round(eq - p["bankroll"], 2)
 
 
+def paper_settle(pstate, api, batch=30):
+    """РЕЗОЛВ виртуальных позиций: рынок разрешён (оракул CLOB) -> редимим долю в кэш
+    (winner 1.0/0.0), реализуем PnL, убираем из открытых. Иначе резолвнутые позиции копятся
+    ВЕЧНО, выигрыш не возвращается в кэш, а экспозиция забивается мёртвым грузом. Стаггером."""
+    import copy_trader as ct
+    keys = list(pstate.get("pos", {}).keys())
+    if not keys:
+        return
+    i = pstate.get("_settle_i", 0) % len(keys)
+    for tok in keys[i:i + batch]:
+        pos = pstate["pos"].get(tok)
+        cid = pos.get("cid") if pos else None
+        if not cid:
+            continue
+        res = ct._oracle(api, cid)                    # {token: 1.0/0.0} если рынок разрешён, иначе None
+        if not res or res.get(str(tok)) is None:
+            continue
+        wp = float(res[str(tok)])
+        sh, cost = pos["shares"], pos["cost"]
+        proceeds = sh * wp
+        pstate["realized"] = round(pstate["realized"] + proceeds - cost, 2)
+        pstate["cash"] = round(pstate["cash"] + proceeds, 2)
+        entry = pos.get("entry") or (cost / sh if sh else 0)
+        pstate.setdefault("closed", []).append({
+            "title": pos.get("title", ""), "outcome": pos.get("outcome", ""), "cid": cid,
+            "w": pos.get("w", ""), "entry": round(entry, 4), "target_px": pos.get("target_px"),
+            "exit_px": round(wp, 4), "shares": round(sh, 2), "realized": round(proceeds - cost, 2),
+            "t_open": pos.get("t_open"), "t_close": int(time.time()), "resolved": True})
+        pstate["pos"].pop(tok, None)
+    if len(pstate.get("closed", [])) > 300:
+        pstate["closed"] = pstate["closed"][-300:]
+    pstate["_settle_i"] = (i + batch) % max(1, len(keys))
+
+
 class PaperClient:
     """Имитация SDK-клиента: «исполняет» ордера по РЕАЛЬНОЙ текущей цене (CLOB midpoint) в
     виртуальный портфель. Ключ/деньги НЕ нужны — только замер. Интерфейс как у SecureClient."""
@@ -583,6 +617,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                                if t in held or t in session_add}
         st_save(state)
         if paper:                                    # теневой отчёт: виртуальный банк и PnL
+            paper_settle(pstate, client.api)         # редимим резолвнутые позы в кэш (стаггером)
             eq, pnl = paper_equity(pstate, client.api)
             roi = pnl / pstate["bankroll"] * 100 if pstate["bankroll"] else 0
             pstate["equity"], pstate["pnl"], pstate["roi"] = eq, pnl, round(roi, 2)
