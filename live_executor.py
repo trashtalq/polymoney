@@ -492,6 +492,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                             pr.setdefault("t_open", int(time.time()))
                             pr["entry"] = round(pr["cost"] / pr["shares"], 4) if pr["shares"] else 0
                     state["tok_wallet"].setdefault(sig["tok"], sig_w)   # токен -> источник (для лимита)
+                    if not paper:                    # цена ЦЕЛИ по токену — для расчёта задержки в пульте
+                        state.setdefault("tok_target", {})[sig["tok"]] = round(float(sig.get("px") or 0), 4)
                     state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + stake
                     state["spent_total"] = round(state["spent_total"] + stake, 2)
                     state["spent_day"] = round(state["spent_day"] + stake, 2)
