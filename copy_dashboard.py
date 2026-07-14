@@ -1959,20 +1959,22 @@ def api_signals():
     if wl_param:                                       # лента по явному списку кошельков (из main)
         wset = {w.strip().lower() for w in wl_param.split(",") if w.strip()}
         bk, _m, stt, _v, _sf = _slot("main")
-        tail_n, filt = 4000, (lambda r: (r.get("w", "") or "").lower() in wset)
+        filt = (lambda r: (r.get("w", "") or "").lower() in wset)
     else:                                              # лента книги-группы (обратная совместимость)
         bk, _m, stt, _v, _sf = _slot(request.args.get("g", "core"))
-        tail_n, filt = 800, (lambda r: True)
-    with _lock:
+        filt = (lambda r: True)
+    with _lock:                                        # под локом только короткий срез (копия refs)
         book = STATE[bk] or {"log": []}
         status = dict(STATE[stt])
         paused = bool(book.get("paused", False))
-        tail = book.get("log", [])[-tail_n:]
-        sigs = [r for r in tail
-                if r.get("act") == "BUY" and r.get("t", 0) > since and r.get("tok") and filt(r)]
-        # ВЫХОДЫ: цель продала (не резолв) -> мирроим выход. frac = какую долю холдинга продала.
-        exits = [r for r in tail
-                 if r.get("act") == "SELL" and r.get("t", 0) > since and r.get("tok") and filt(r)]
+        # ВАЖНО (фикс 2026-07-14): окно БОЛЬШОЕ. Всплеск SETTLE/REDEEM от резолвов раньше вытеснял
+        # реальные BUY/SELL за узкое окно [-4000:] -> бот переставал получать входы И выходы.
+        recent = book.get("log", [])[-60000:]
+    sigs = [r for r in recent                          # фильтруем ВНЕ лока (не блокируем poll_loop)
+            if r.get("act") == "BUY" and r.get("t", 0) > since and r.get("tok") and filt(r)]
+    # ВЫХОДЫ: цель продала (не резолв) -> мирроим выход. frac = какую долю холдинга продала.
+    exits = [r for r in recent
+             if r.get("act") == "SELL" and r.get("t", 0) > since and r.get("tok") and filt(r)]
     return jsonify({"now": int(time.time()), "paused": paused,
                     "last_poll": status.get("last_poll", 0),
                     "signals": [{"t": r["t"], "w": r.get("w", ""), "tok": r["tok"],
