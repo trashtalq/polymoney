@@ -132,6 +132,16 @@ def resolve_days(s, cid, now):
     return None if not end else (end - now) / 86400
 
 
+def clob_mid(s, tok):
+    """Текущая midpoint-цена токена из CLOB (для доразмера под задержку и потолка FAK). None при сбое."""
+    try:
+        r = s.get(f"https://clob.polymarket.com/midpoint?token_id={tok}", timeout=10).json()
+        m = r.get("mid") if isinstance(r, dict) else None
+        return float(m) if m is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def fetch_held(s, funder):
     """Реальные позиции по токенам с кошелька (data-api): {asset: {"usd": вложено, "shares": долей}}.
     $ — основа лимита входов в позу; shares — сколько ПРОДАТЬ при мирроринге выхода. Берётся с
@@ -275,7 +285,8 @@ def resp_ok(resp):
 
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
              max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
-             signals_token="", min_price=0.12, paper=False, pstate=None):
+             signals_token="", min_price=0.12, paper=False, pstate=None,
+             chase_match=False, chase_max_mult=2.0):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -394,9 +405,17 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                           f"капитал застрянет): {title}", flush=True)
                     state["done"].append(k)
                     continue
+            # ДОРАЗМЕР ПОД ЗАДЕРЖКУ («платим за лаг»): рынок ушёл ВВЕРХ от цены сигнала -> множим
+            # ставку на текущая/цена_цели, чтобы взять СТОЛЬКО ЖЕ долей, как цель (тот же payout;
+            # переплата = честная плата за задержку). Потолок множителя = chase_max_mult. chase_mid
+            # нужен и для потолка FAK (иначе +2¢ от старой цены не даст налиться на ушедшем рынке).
+            stake = per_trade
+            chase_mid = clob_mid(s, sig["tok"]) if chase_match else None
+            if chase_match and chase_mid and px > 0 and chase_mid > px:
+                stake = round(per_trade * min(chase_max_mult, chase_mid / px), 2)
             # лимит на позу по РЕАЛЬНОМУ вложению (чейн + входы этого цикла) — не больше cap_usd
             deployed = held.get(sig["tok"], {}).get("usd", 0.0) + session_add.get(sig["tok"], 0.0)
-            if deployed + per_trade > cap_usd + 1e-6:
+            if deployed + stake > cap_usd + 1e-6:
                 print(f"  skip (в этой позе уже ~${deployed:.2f}, лимит ${cap_usd:.2f}): {title}",
                       flush=True)
                 state["done"].append(k)
@@ -407,7 +426,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             sig_w = (sig.get("w", "") or "")
             if max_per_wallet:
                 wexp = wallet_exposure(sig_w) if (funder or paper) else state["spent_by_wallet"].get(sig_w, 0.0)
-                if wexp + per_trade > max_per_wallet + 1e-6:
+                if wexp + stake > max_per_wallet + 1e-6:
                     unit = "в позах" if (funder or paper) else "за день"
                     print(f"  skip (с кошелька {sig_w[:8]}… {unit} уже ~${wexp:.2f}, лимит "
                           f"${max_per_wallet:.0f} — ждём закрытия его позиций): {title}", flush=True)
@@ -418,21 +437,24 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             # реальным холдингам с чейна (funder) + входы этого цикла. Без funder — старый счётчик.
             exposure = (sum(v.get("usd", 0.0) for v in held.values()) + sum(session_add.values())
                         if (funder or paper) else state["spent_total"])
-            if exposure + per_trade > deposit + 1e-6:
-                print(f"  skip (в открытых позах ~${exposure:.2f}+${per_trade:g} > депозит ${deposit:g} "
+            if exposure + stake > deposit + 1e-6:
+                print(f"  skip (в открытых позах ~${exposure:.2f}+${stake:g} > депозит ${deposit:g} "
                       f"— ждём, пока освободятся): {title}", flush=True)
                 state["done"].append(k)
                 continue
-            if state["spent_day"] + per_trade > daily_max:
+            if state["spent_day"] + stake > daily_max:
                 print(f"  дневной лимит ${daily_max} достигнут — пауза до завтра", flush=True)
                 break
 
-            line = f"{sig.get('out', ''):>3} '{title}' @ ~{px}  ${per_trade} (tok…{sig['tok'][-6:]})"
+            entry_px = chase_mid if (chase_match and chase_mid) else px
+            line = (f"{sig.get('out', ''):>3} '{title}' @ ~{entry_px}  ${stake:g}"
+                    + (f" (x{stake/per_trade:.1f} догон)" if stake > per_trade + 1e-6 else "")
+                    + f" (tok…{sig['tok'][-6:]})")
 
             if mode == "dry":
                 print(f"  [DRY] купил бы: {line}", flush=True)
-                session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade  # dry-превью лимитов
-                state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + per_trade
+                session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + stake  # dry-превью лимитов
+                state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + stake
                 state["tok_wallet"].setdefault(sig["tok"], sig_w)   # токен -> источник (первый закрепляет)
                 state["done"].append(k)
                 continue
@@ -447,17 +469,18 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             # потолок = цена сигнала + ~2 цента, ОКРУГЛЁННЫЙ ВВЕРХ ДО ЦЕНТА (2 знака): рынки с
             # шагом 0.01 требуют максимум 2 знака после запятой (иначе tick-size ошибка и ордер
             # не проходит — так терялось ~2/3 сигналов). 2-значная цена конформна и тику 0.001.
-            cap = min(max_price, math.ceil((px + 0.02) * 100 - 1e-9) / 100)
+            # при догоне потолок FAK считаем от ТЕКУЩЕЙ цены (иначе +2¢ от старой не нальётся)
+            cap = min(max_price, math.ceil((entry_px + 0.02) * 100 - 1e-9) / 100)
             try:
                 resp = client.place_market_order(
-                    token_id=sig["tok"], side="BUY", amount=float(per_trade),
+                    token_id=sig["tok"], side="BUY", amount=float(stake),
                     order_type="FAK", max_price=cap)
                 ok = resp_ok(resp)
                 _tag = "PAPER" if paper else ("SMOKE" if mode == "smoke" else "LIVE")
                 print(f"  [{_tag}] ордер: {line}" + ("" if paper else f" -> {resp!r}"), flush=True)
                 if ok:
                     state["done"].append(k)
-                    session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + per_trade
+                    session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + stake
                     if paper:                        # обогащаем виртуальную позу для журнала/сверки
                         pr = pstate["pos"].get(sig["tok"])
                         if pr is not None:
@@ -469,9 +492,9 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                             pr.setdefault("t_open", int(time.time()))
                             pr["entry"] = round(pr["cost"] / pr["shares"], 4) if pr["shares"] else 0
                     state["tok_wallet"].setdefault(sig["tok"], sig_w)   # токен -> источник (для лимита)
-                    state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + per_trade
-                    state["spent_total"] = round(state["spent_total"] + per_trade, 2)
-                    state["spent_day"] = round(state["spent_day"] + per_trade, 2)
+                    state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + stake
+                    state["spent_total"] = round(state["spent_total"] + stake, 2)
+                    state["spent_day"] = round(state["spent_day"] + stake, 2)
                     smoke_done = True
                     st_save(state)
                     if mode == "smoke":
@@ -570,6 +593,8 @@ def main():
     #   освобождают ВЫХОДЫ вслед за целью, не пред-фильтр; цели флипают и долгие рынки)
     exit_min_frac = float(cfg.get("EXIT_MIN_FRAC") or 0.1)      # выходим, как только цель продала >= этой
     #   доли своего холдинга (0.1 = на первую значимую продажу; 0.01 = на ЛЮБУЮ; выше = только на крупный выход)
+    chase_match = bool(int(float(cfg.get("CHASE_MATCH") or 0)))  # догон: докупать до долей цели (плата за лаг)
+    chase_max_mult = float(cfg.get("CHASE_MAX_MULT") or 2.0)     # потолок множителя ставки при догоне
 
     rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
     print(f"=== live_executor | MODE={mode.upper()} | лимит-в-позах ${deposit} | ставка ${per_trade} | "
@@ -595,6 +620,8 @@ def main():
         p_resolve = pf("PAPER_MAX_RESOLVE_DAYS", max_resolve_days)
         p_exit = pf("PAPER_EXIT_MIN_FRAC", exit_min_frac)
         p_poll = int(pf("PAPER_POLL_SEC", poll))
+        p_chase = bool(int(pf("PAPER_CHASE_MATCH", 0)))
+        p_chase_mult = pf("PAPER_CHASE_MAX_MULT", 2.0)
         pstate = pst_load(bankroll)
         pstate["bankroll"] = bankroll                # если поменяли банк в env — подхватываем
         api = ct.API()
@@ -605,14 +632,14 @@ def main():
         run_loop("paper", pclient, server, group, bankroll, p_trade, bankroll, p_maxpx, p_poll, p_age,
                  p_entries, "", p_wallet, p_resolve, p_exit,
                  signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=p_minpx,
-                 paper=True, pstate=pstate)
+                 paper=True, pstate=pstate, chase_match=p_chase, chase_max_mult=p_chase_mult)
         return
 
     if mode == "dry":
         run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
                  max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet, max_resolve_days,
                  exit_min_frac, signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(),
-                 min_price=min_price)
+                 min_price=min_price, chase_match=chase_match, chase_max_mult=chase_max_mult)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -639,7 +666,8 @@ def main():
     with client:                                     # SDK-клиент как контекст (сессия/очистка)
         run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
                  max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
-                 signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=min_price)
+                 signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=min_price,
+                 chase_match=chase_match, chase_max_mult=chase_max_mult)
 
 
 if __name__ == "__main__":
