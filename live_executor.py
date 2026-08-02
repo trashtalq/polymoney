@@ -100,7 +100,8 @@ def load_env():
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
         "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS", "EXIT_MIN_FRAC",
-        "SIGNALS_TOKEN", "TG_ENABLED", "TG_TOKEN", "TG_CHAT", "TG_TAG", "TG_SUMMARY_H")})
+        "SIGNALS_TOKEN", "TG_ENABLED", "TG_TOKEN", "TG_CHAT", "TG_TAG", "TG_SUMMARY_H",
+        "TG_DAILY_AT")})
     return cfg
 
 
@@ -464,7 +465,7 @@ def resp_ok(resp):
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
              max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
              signals_token="", min_price=0.12, paper=False, pstate=None,
-             chase_match=False, chase_max_mult=2.0, summary_h=24.0):
+             chase_match=False, chase_max_mult=2.0, summary_h=24.0, daily_at_min=1410):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -550,6 +551,9 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             state["day"] = today
             state["spent_day"] = 0.0
             state["spent_by_wallet"] = {}
+            state["day_pnl"] = 0.0                   # заработок за день (по закрытым сделкам)
+            state["day_buys"] = 0
+            state["day_sells"] = 0
 
         allow = load_allowlist()                      # белый список кошельков (перечитывается на лету)
         holding = hold_only(paper)                     # горячий флаг «ДЕРЖИМ»: входы на паузе
@@ -691,6 +695,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                     state["spent_total"] = round(state["spent_total"] + stake, 2)
                     state["spent_day"] = round(state["spent_day"] + stake, 2)
                     state["n_buys"] = int(state.get("n_buys", 0)) + 1   # РЕАЛЬНЫЕ покупки (не done)
+                    state["day_buys"] = int(state.get("day_buys", 0)) + 1
                     smoke_done = True
                     st_save(state)
                     if mode == "smoke":
@@ -731,6 +736,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 continue
             shares = math.floor(held.get(tok, {}).get("shares", 0.0) * 100) / 100   # вниз, не оверселл
             invested = held.get(tok, {}).get("usd", 0.0)      # для PnL в уведомлении
+            hs = held.get(tok, {}).get("shares", 0.0)
+            entry_avg = (invested / hs) if hs else 0          # НАША средняя цена входа
             if shares <= 0:                                   # мы это не держим -> нечего продавать
                 state["done"].append(xk)
                 continue
@@ -740,22 +747,34 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 print(f"  [DRY] продал бы всю позу (~{shares} долей): {xtitle}", flush=True)
                 state["done"].append(xk)
                 continue
+            # оценка цены выхода ДО ордера (по бидам стакана) — чтобы честно показать результат
+            exit_est = clob_fill(s, tok, "SELL", shares=shares) if not paper else None
             try:
                 resp = client.place_market_order(token_id=tok, side="SELL",
                                                  shares=float(shares), order_type="FAK")
                 if resp_ok(resp):
                     print(f"  [LIVE] ВЫХОД вслед за целью: продал ~{shares} долей -> {xtitle}",
                           flush=True)
-                    # PnL сделки: у paper он точный (из журнала), у реала — оценочный по последней цене
-                    pnl_txt = ""
+                    # РЕЗУЛЬТАТ сделки: у paper точный (журнал), у реала — по стакану на момент продажи
+                    e_px = x_px = None
+                    pnl = None
                     if paper and pstate.get("closed"):
                         last = pstate["closed"][-1]
                         if last.get("cid") == ex.get("cid") or last.get("title") == xtitle:
-                            r_ = last.get("realized", 0)
-                            pnl_txt = (f"\nрезультат: <b>{r_:+.2f}$</b> "
-                                       f"(вход {last.get('entry')} → выход {last.get('exit_px')})")
-                    tg_send(f"🔴 ВЫХОД вслед за целью {_mkt_link(xtitle)}\n"
-                            f"продано ~{shares:g} долей (вложено было ${invested:.2f}){pnl_txt}")
+                            e_px, x_px, pnl = last.get("entry"), last.get("exit_px"), last.get("realized")
+                    elif exit_est:
+                        x_px, got_sh, _f = exit_est
+                        e_px = round(entry_avg, 3)
+                        pnl = round(x_px * got_sh - invested, 2)
+                    if pnl is not None:
+                        state["day_pnl"] = round(float(state.get("day_pnl", 0)) + pnl, 2)
+                        state["day_sells"] = int(state.get("day_sells", 0)) + 1
+                    roi_txt = f" ({pnl / invested * 100:+.1f}%)" if (pnl is not None and invested) else ""
+                    body = (f"вход {e_px} → выход {x_px}\n" if (e_px and x_px) else "")
+                    body += f"продано ~{shares:g} долей · вложено ${invested:.2f}"
+                    if pnl is not None:
+                        body += f"\nрезультат: <b>{pnl:+.2f}$</b>{roi_txt}"
+                    tg_send(f"🔴 ВЫХОД вслед за целью {_mkt_link(xtitle)}\n{body}")
                     held[tok] = {"usd": 0.0, "shares": 0.0}   # локально помечаем закрытым до след. fetch
                     state["done"].append(xk)
                     st_save(state)
@@ -780,7 +799,31 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                   f"({roi:+.1f}%) | реализ {pstate['realized']:+,.0f}$ | позиций {len(pstate['pos'])} "
                   f"| кэш ${pstate['cash']:,.0f} | сделок {pstate['buys']}/{pstate['sells']}", flush=True)
             pst_save(pstate)
-        # ── периодический ИТОГ БАНКРОЛЛА в телеграм (по умолчанию раз в 24ч) ──
+        # ── ИТОГ ДНЯ в телеграм: раз в сутки после времени TG_DAILY_AT (локальное, деф. 23:30) ──
+        _now = time.localtime()
+        _due = (_now.tm_hour * 60 + _now.tm_min) >= daily_at_min
+        if _TG["on"] and _due and state.get("tg_sum_day") != today:
+            state["tg_sum_day"] = today
+            if not paper:
+                inv_ = sum(v.get("usd", 0.0) for v in held.values())
+                d_pnl = float(state.get("day_pnl", 0))
+                tg_send(f"🌙 <b>ИТОГ ДНЯ</b> · {today}\n"
+                        f"заработано за день: <b>{d_pnl:+.2f}$</b>\n"
+                        f"сделок: {int(state.get('day_buys', 0))} входов / "
+                        f"{int(state.get('day_sells', 0))} выходов\n"
+                        f"потрачено на входы: ${state.get('spent_day', 0):.2f}\n"
+                        f"сейчас открыто: {len(held)} позиций на ${inv_:,.2f}\n"
+                        f"покупок за всё время: {int(state.get('n_buys', 0))}")
+            else:
+                eq_, pnl_ = paper_equity(pstate, client.api)
+                roi_ = pnl_ / pstate["bankroll"] * 100 if pstate["bankroll"] else 0
+                tg_send(f"🌙 <b>ИТОГ ДНЯ</b> · {today}\n"
+                        f"банк: <b>${eq_:,.0f}</b> (старт ${pstate['bankroll']:,.0f})\n"
+                        f"PnL всего: <b>{pnl_:+,.2f}$</b> ({roi_:+.2f}%)\n"
+                        f"сделок: {int(state.get('day_buys', 0))} входов / "
+                        f"{int(state.get('day_sells', 0))} выходов\n"
+                        f"открыто: {len(pstate['pos'])} позиций · кэш ${pstate['cash']:,.0f}")
+        # ── дополнительный периодический отчёт (если задан TG_SUMMARY_H > 0) ──
         if _TG["on"] and summary_h > 0 and time.time() - state.get("tg_sum_t", 0) > summary_h * 3600:
             state["tg_sum_t"] = time.time()
             if paper:
@@ -803,7 +846,12 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
 def main():
     cfg = load_env()
     tg_init(cfg)                                     # телеграм-уведомления (по умолч. выключены)
-    summary_h = float(cfg.get("TG_SUMMARY_H") or 24)
+    summary_h = float(cfg.get("TG_SUMMARY_H") or 0)      # доп. периодический отчёт (0 = не слать)
+    _at = (cfg.get("TG_DAILY_AT") or "23:30").strip()     # во сколько слать ИТОГ ДНЯ (локальное время)
+    try:
+        _h, _m = _at.split(":"); daily_at_min = int(_h) * 60 + int(_m)
+    except Exception:  # noqa: BLE001
+        daily_at_min = 23 * 60 + 30
     mode = (cfg.get("MODE") or "dry").lower()
     server = cfg.get("SERVER") or "http://144.31.197.121:5000"
     group = cfg.get("GROUP") or "core"
@@ -860,7 +908,7 @@ def main():
                  p_entries, "", p_wallet, p_resolve, p_exit,
                  signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=p_minpx,
                  paper=True, pstate=pstate, chase_match=p_chase, chase_max_mult=p_chase_mult,
-                 summary_h=summary_h)
+                 summary_h=summary_h, daily_at_min=daily_at_min)
         return
 
     if mode == "dry":
@@ -868,7 +916,7 @@ def main():
                  max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet, max_resolve_days,
                  exit_min_frac, signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(),
                  min_price=min_price, chase_match=chase_match, chase_max_mult=chase_max_mult,
-                 summary_h=summary_h)
+                 summary_h=summary_h, daily_at_min=daily_at_min)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -896,7 +944,7 @@ def main():
         run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
                  max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
                  signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=min_price,
-                 chase_match=chase_match, chase_max_mult=chase_max_mult, summary_h=summary_h)
+                 chase_match=chase_match, chase_max_mult=chase_max_mult, summary_h=summary_h, daily_at_min=daily_at_min)
 
 
 if __name__ == "__main__":
