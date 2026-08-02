@@ -734,6 +734,13 @@ class App(tk.Tk):
         # и на Windows os.replace падает с PermissionError (файл занят другим процессом).
         env["STATE_FILE"] = "paper_exec_state.json"
         env["HOLD_FILE"] = "hold_only_paper.json"
+        # В ПУБЛИЧНЫЙ канал пишет только РЕАЛЬНЫЙ бот: виртуальные сделки рядом с настоящими
+        # путают (у теневого своя ставка) и вводят в заблуждение читателей канала.
+        # Хочешь и теневой в телеге — поставь TG_PAPER=1 в polymarket.env.
+        if str(read_env().get("TG_PAPER") or "0").strip() not in ("1", "true", "yes", "on"):
+            env["TG_ENABLED"] = "0"
+        else:
+            env["TG_TAG"] = "🌗 ТЕНЕВОЙ (виртуальные)"
         flags = 0x08000000 if os.name == "nt" else 0
         try:
             self.paper_proc = subprocess.Popen(
@@ -1000,6 +1007,10 @@ class App(tk.Tk):
         env["PAPER_STATE_FILE"] = BEST_STATE.name    # СВОЙ виртуальный счёт
         env["STATE_FILE"] = BEST_EXEC_STATE.name     # СВОЙ журнал исполненного
         env["HOLD_FILE"] = "hold_only_best.json"
+        if str(read_env().get("TG_PAPER") or "0").strip() not in ("1", "true", "yes", "on"):
+            env["TG_ENABLED"] = "0"                  # тест — не в публичный канал (см. start_paper)
+        else:
+            env["TG_TAG"] = "⭐ ТЕСТ ЛУЧШИХ (виртуальные)"
         flags = 0x08000000 if os.name == "nt" else 0
         try:
             self.best_proc = subprocess.Popen(

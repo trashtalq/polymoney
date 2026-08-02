@@ -111,11 +111,15 @@ def load_env():
 _TG = {"on": False, "token": "", "chat": "", "tag": "", "sess": None, "fails": 0}
 
 
-def tg_init(cfg):
+def tg_init(cfg, mode=""):
     _TG["on"] = str(cfg.get("TG_ENABLED") or "0").strip() in ("1", "true", "yes", "on")
     _TG["token"] = (cfg.get("TG_TOKEN") or "").strip()
     _TG["chat"] = (cfg.get("TG_CHAT") or "").strip()
-    _TG["tag"] = (cfg.get("TG_TAG") or "").strip()
+    # МЕТКА КОНТУРА обязательна: реальный и теневой боты пишут в один канал, и без неё сообщения
+    # неотличимы (у теневого другая ставка — легко принять виртуальную сделку за настоящую).
+    _TG["tag"] = (cfg.get("TG_TAG") or "").strip() or {
+        "paper": "🌗 ТЕНЕВОЙ (виртуальные)", "live": "💰 РЕАЛ",
+        "smoke": "🧪 SMOKE", "dry": "🧪 DRY"}.get(mode, "")
     if _TG["on"] and not (_TG["token"] and _TG["chat"]):
         print("!! TG_ENABLED=1, но нет TG_TOKEN/TG_CHAT в polymarket.env — уведомления выключены",
               flush=True)
@@ -856,7 +860,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
 
 def main():
     cfg = load_env()
-    tg_init(cfg)                                     # телеграм-уведомления (по умолч. выключены)
+    tg_init(cfg, (cfg.get("MODE") or "dry").lower())  # телеграм: метка контура в каждом сообщении
     summary_h = float(cfg.get("TG_SUMMARY_H") or 0)      # доп. периодический отчёт (0 = не слать)
     _at = (cfg.get("TG_DAILY_AT") or "23:30").strip()     # во сколько слать ИТОГ ДНЯ (локальное время)
     try:
