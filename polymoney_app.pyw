@@ -313,6 +313,8 @@ class App(tk.Tk):
         self.hold_btn = ttk.Button(bar, text="⏸ Стоп входов (держим)", style="Small.TButton",
                                    command=lambda: self._toggle_hold(False))
         self.hold_btn.pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="✈ Тест TG", style="Small.TButton",
+                   command=self.tg_test).pack(side="left", padx=(8, 0))
         ttk.Label(bar, text="", style="Card.TLabel").pack(side="left", expand=True, fill="x")
         # ── баланс Polymarket: портфель (позиции+наличные) и «Доступно» (кэш, по ключу локально) ──
         money = ttk.Frame(bar, style="Card.TFrame")
@@ -789,6 +791,38 @@ class App(tk.Tk):
             self._save_uptime(total)                 # периодически на диск (переживёт краш пульта)
             self._uptime_save_t = time.time()
         self.after(1000, self._tick_paper_timer)
+
+    # ── проверка Telegram-канала (до включения в бою) ──
+    def tg_test(self):
+        cfg = read_env()
+        tok, chat = (cfg.get("TG_TOKEN") or "").strip(), (cfg.get("TG_CHAT") or "").strip()
+        if not (tok and chat):
+            messagebox.showinfo(
+                "Telegram не настроен",
+                "В polymarket.env впиши:\n\n"
+                "TG_TOKEN=  (от @BotFather)\n"
+                "TG_CHAT=   (@имя_канала или id)\n"
+                "TG_ENABLED=1\n\n"
+                "Бота нужно добавить в канал АДМИНОМ.")
+            return
+        if requests is None:
+            return
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{tok}/sendMessage",
+                              json={"chat_id": chat, "parse_mode": "HTML",
+                                    "text": "✅ <b>POLYMONEY</b> — проверка связи. "
+                                            "Уведомления о входах/выходах будут приходить сюда."},
+                              timeout=15)
+            if r.status_code == 200:
+                self._log_raw(f"✈ Тестовое сообщение отправлено в {chat}", "green")
+                messagebox.showinfo("Готово", f"Сообщение ушло в {chat}. Проверь канал.")
+            else:
+                d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+                messagebox.showerror("Не отправилось",
+                                     f"{r.status_code}: {d.get('description', r.text[:200])}\n\n"
+                                     "Частая причина: бот не добавлен в канал администратором.")
+        except Exception as ex:  # noqa: BLE001
+            messagebox.showerror("Ошибка сети", str(ex))
 
     # ── режим «ДЕРЖИМ»: стоп новых входов, выходы за целью работают (горячий флаг) ──
     def _read_hold(self, paper):

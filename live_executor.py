@@ -100,8 +100,56 @@ def load_env():
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
         "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS", "EXIT_MIN_FRAC",
-        "SIGNALS_TOKEN")})
+        "SIGNALS_TOKEN", "TG_ENABLED", "TG_TOKEN", "TG_CHAT", "TG_TAG", "TG_SUMMARY_H")})
     return cfg
+
+
+# ───────────────── Telegram-уведомления (вход/выход/итоги банкролла) ─────────────────
+# Токен бота — СЕКРЕТ: живёт только в polymarket.env (gitignored), как приватный ключ.
+# По умолчанию ВЫКЛЮЧЕНО (TG_ENABLED=0) — ничего никуда не уходит, пока сам не включишь.
+_TG = {"on": False, "token": "", "chat": "", "tag": "", "sess": None, "fails": 0}
+
+
+def tg_init(cfg):
+    _TG["on"] = str(cfg.get("TG_ENABLED") or "0").strip() in ("1", "true", "yes", "on")
+    _TG["token"] = (cfg.get("TG_TOKEN") or "").strip()
+    _TG["chat"] = (cfg.get("TG_CHAT") or "").strip()
+    _TG["tag"] = (cfg.get("TG_TAG") or "").strip()
+    if _TG["on"] and not (_TG["token"] and _TG["chat"]):
+        print("!! TG_ENABLED=1, но нет TG_TOKEN/TG_CHAT в polymarket.env — уведомления выключены",
+              flush=True)
+        _TG["on"] = False
+    if _TG["on"]:
+        _TG["sess"] = requests.Session()
+        print(f"Telegram-уведомления: ВКЛ -> {_TG['chat']}", flush=True)
+    return _TG["on"]
+
+
+def tg_send(text, silent=False):
+    """Отправка в канал/чат. Тихо игнорирует сбои (уведомления не должны ломать торговлю)."""
+    if not _TG["on"] or _TG["fails"] > 20:
+        return False
+    try:
+        r = _TG["sess"].post(
+            f"https://api.telegram.org/bot{_TG['token']}/sendMessage",
+            json={"chat_id": _TG["chat"], "text": (f"{_TG['tag']} " if _TG["tag"] else "") + text,
+                  "parse_mode": "HTML", "disable_web_page_preview": True,
+                  "disable_notification": bool(silent)}, timeout=12)
+        if r.status_code != 200:
+            _TG["fails"] += 1
+            if _TG["fails"] <= 3:
+                print(f"  [TG] не отправлено ({r.status_code}): {r.text[:120]}", flush=True)
+            return False
+        _TG["fails"] = 0
+        return True
+    except Exception:  # noqa: BLE001
+        _TG["fails"] += 1
+        return False
+
+
+def _mkt_link(title, cid=""):
+    t = (title or "рынок")[:80]
+    return f"<b>{t}</b>"
 
 
 def st_load():
@@ -411,7 +459,7 @@ def resp_ok(resp):
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
              max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
              signals_token="", min_price=0.12, paper=False, pstate=None,
-             chase_match=False, chase_max_mult=2.0):
+             chase_match=False, chase_max_mult=2.0, summary_h=24.0):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -626,6 +674,9 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                     state["tok_wallet"].setdefault(sig["tok"], sig_w)   # токен -> источник (для лимита)
                     if not paper:                    # цена ЦЕЛИ по токену — для расчёта задержки в пульте
                         state.setdefault("tok_target", {})[sig["tok"]] = round(float(sig.get("px") or 0), 4)
+                    tg_send(f"🟢 ВХОД {_mkt_link(title)}\n"
+                            f"ставка: <b>{sig.get('out','')}</b> · цена ~{entry_px:.3f} · "
+                            f"${stake:g}\nсигнал от {sig_w[:8]}… (его цена {px:.3f})", silent=True)
                     state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + stake
                     state["spent_total"] = round(state["spent_total"] + stake, 2)
                     state["spent_day"] = round(state["spent_day"] + stake, 2)
@@ -668,6 +719,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 state["done"].append(xk)
                 continue
             shares = math.floor(held.get(tok, {}).get("shares", 0.0) * 100) / 100   # вниз, не оверселл
+            invested = held.get(tok, {}).get("usd", 0.0)      # для PnL в уведомлении
             if shares <= 0:                                   # мы это не держим -> нечего продавать
                 state["done"].append(xk)
                 continue
@@ -683,6 +735,16 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 if resp_ok(resp):
                     print(f"  [LIVE] ВЫХОД вслед за целью: продал ~{shares} долей -> {xtitle}",
                           flush=True)
+                    # PnL сделки: у paper он точный (из журнала), у реала — оценочный по последней цене
+                    pnl_txt = ""
+                    if paper and pstate.get("closed"):
+                        last = pstate["closed"][-1]
+                        if last.get("cid") == ex.get("cid") or last.get("title") == xtitle:
+                            r_ = last.get("realized", 0)
+                            pnl_txt = (f"\nрезультат: <b>{r_:+.2f}$</b> "
+                                       f"(вход {last.get('entry')} → выход {last.get('exit_px')})")
+                    tg_send(f"🔴 ВЫХОД вслед за целью {_mkt_link(xtitle)}\n"
+                            f"продано ~{shares:g} долей (вложено было ${invested:.2f}){pnl_txt}")
                     held[tok] = {"usd": 0.0, "shares": 0.0}   # локально помечаем закрытым до след. fetch
                     state["done"].append(xk)
                     st_save(state)
@@ -707,11 +769,28 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                   f"({roi:+.1f}%) | реализ {pstate['realized']:+,.0f}$ | позиций {len(pstate['pos'])} "
                   f"| кэш ${pstate['cash']:,.0f} | сделок {pstate['buys']}/{pstate['sells']}", flush=True)
             pst_save(pstate)
+        # ── периодический ИТОГ БАНКРОЛЛА в телеграм (по умолчанию раз в 24ч) ──
+        if _TG["on"] and summary_h > 0 and time.time() - state.get("tg_sum_t", 0) > summary_h * 3600:
+            state["tg_sum_t"] = time.time()
+            if paper:
+                eq_, pnl_ = paper_equity(pstate, client.api)
+                roi_ = pnl_ / pstate["bankroll"] * 100 if pstate["bankroll"] else 0
+                tg_send(f"📊 <b>ИТОГ</b>\nбанк: <b>${eq_:,.0f}</b> (старт ${pstate['bankroll']:,.0f})\n"
+                        f"PnL: <b>{pnl_:+,.2f}$</b> ({roi_:+.2f}%)\n"
+                        f"реализовано: {pstate['realized']:+,.2f}$ · открытых: {len(pstate['pos'])}\n"
+                        f"сделок: {pstate['buys']} входов / {pstate['sells']} выходов")
+            else:
+                inv = sum(v.get("usd", 0.0) for v in held.values())
+                tg_send(f"📊 <b>ИТОГ</b>\nв открытых позициях: <b>${inv:,.2f}</b> "
+                        f"({len(held)} шт)\nпотрачено сегодня: ${state.get('spent_day', 0):.2f}\n"
+                        f"всего входов: {len(state.get('done', []))}")
         time.sleep(poll)
 
 
 def main():
     cfg = load_env()
+    tg_init(cfg)                                     # телеграм-уведомления (по умолч. выключены)
+    summary_h = float(cfg.get("TG_SUMMARY_H") or 24)
     mode = (cfg.get("MODE") or "dry").lower()
     server = cfg.get("SERVER") or "http://144.31.197.121:5000"
     group = cfg.get("GROUP") or "core"
@@ -767,14 +846,16 @@ def main():
         run_loop("paper", pclient, server, group, bankroll, p_trade, bankroll, p_maxpx, p_poll, p_age,
                  p_entries, "", p_wallet, p_resolve, p_exit,
                  signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=p_minpx,
-                 paper=True, pstate=pstate, chase_match=p_chase, chase_max_mult=p_chase_mult)
+                 paper=True, pstate=pstate, chase_match=p_chase, chase_max_mult=p_chase_mult,
+                 summary_h=summary_h)
         return
 
     if mode == "dry":
         run_loop(mode, None, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
                  max_entries, (cfg.get("FUNDER") or "").strip(), max_per_wallet, max_resolve_days,
                  exit_min_frac, signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(),
-                 min_price=min_price, chase_match=chase_match, chase_max_mult=chase_max_mult)
+                 min_price=min_price, chase_match=chase_match, chase_max_mult=chase_max_mult,
+                 summary_h=summary_h)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -802,7 +883,7 @@ def main():
         run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
                  max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
                  signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=min_price,
-                 chase_match=chase_match, chase_max_mult=chase_max_mult)
+                 chase_match=chase_match, chase_max_mult=chase_max_mult, summary_h=summary_h)
 
 
 if __name__ == "__main__":
