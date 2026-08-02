@@ -145,6 +145,61 @@ def resolve_days(s, cid, now):
     return None if not end else (end - now) / 86400
 
 
+def clob_price(s, tok, side):
+    """Лучшая цена стороны стакана CLOB. ВНИМАНИЕ (проверено на живых данных): у Polymarket
+    side='buy' отдаёт лучший БИД (что предлагают покупатели), side='sell' — лучший АСК.
+    Поэтому МЫ покупаем по side='sell', а продаём по side='buy'. None при сбое."""
+    try:
+        r = s.get(f"https://clob.polymarket.com/price?token_id={tok}&side={side}", timeout=10).json()
+        p = r.get("price") if isinstance(r, dict) else None
+        p = float(p) if p is not None else None
+        return p if (p is not None and 0 < p < 1) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def clob_fill(s, tok, side, usd=None, shares=None):
+    """РЕАЛИСТИЧНЫЙ филл по СТАКАНУ: идём по уровням (asks для покупки, bids для продажи) и
+    считаем VWAP на нужный объём. Возвращает (vwap, исполнено_долей, полностью_ли).
+    Так учитывается и спред, и ГЛУБИНА: крупная заявка съедает уровни и берёт хуже лучшей цены,
+    а на тонком рынке исполняется лишь частично — ровно как реальный FAK. None при сбое."""
+    try:
+        b = s.get(f"https://clob.polymarket.com/book?token_id={tok}", timeout=12).json()
+    except Exception:  # noqa: BLE001
+        return None
+    lv = (b.get("asks") if side == "BUY" else b.get("bids")) or []
+    try:
+        lv = [(float(x["price"]), float(x["size"])) for x in lv]
+    except Exception:  # noqa: BLE001
+        return None
+    if not lv:
+        return None
+    lv.sort(key=lambda x: x[0], reverse=(side != "BUY"))    # BUY: дешёвые asks; SELL: дорогие bids
+    got_sh = got_usd = 0.0
+    for px, sz in lv:
+        if not (0 < px < 1) or sz <= 0:
+            continue
+        if side == "BUY":
+            take_usd = min(usd - got_usd, px * sz)
+            if take_usd <= 1e-9:
+                break
+            got_usd += take_usd
+            got_sh += take_usd / px
+            if got_usd >= usd - 1e-9:
+                break
+        else:
+            take_sh = min(shares - got_sh, sz)
+            if take_sh <= 1e-9:
+                break
+            got_sh += take_sh
+            got_usd += take_sh * px
+    if got_sh <= 0:
+        return None
+    vwap = got_usd / got_sh
+    full = (got_usd >= (usd or 0) - 1e-6) if side == "BUY" else (got_sh >= (shares or 0) - 1e-6)
+    return round(vwap, 5), got_sh, full
+
+
 def clob_mid(s, tok):
     """Текущая midpoint-цена токена из CLOB (для доразмера под задержку и потолка FAK). None при сбое."""
     try:
@@ -256,12 +311,15 @@ def paper_settle(pstate, api, batch=30):
 
 
 class PaperClient:
-    """Имитация SDK-клиента: «исполняет» ордера по РЕАЛЬНОЙ текущей цене (CLOB midpoint) в
-    виртуальный портфель. Ключ/деньги НЕ нужны — только замер. Интерфейс как у SecureClient."""
-    def __init__(self, pstate, api, slip=0.01):
+    """Имитация SDK-клиента максимально близко к реальному исполнению: покупаем по лучшему ASK,
+    продаём по лучшему BID (реальный стакан CLOB) — то есть платим спред с ОБЕИХ сторон, как в
+    жизни. Если стакан недоступен — откат на midpoint±slip. Ключ/деньги НЕ нужны."""
+    def __init__(self, pstate, api, slip=0.01, sess=None):
         self.p = pstate
         self.api = api
         self.slip = slip
+        self.s = sess or requests.Session()
+        self.s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
 
     def _mid(self, tok):
         try:
@@ -270,25 +328,45 @@ class PaperClient:
         except Exception:  # noqa: BLE001
             return None
 
+    def _fill_px(self, tok, side):
+        """Цена, по которой РЕАЛЬНО исполнился бы наш рыночный ордер (противоположная сторона
+        стакана): МЫ покупаем по аску (у API это side='sell'), продаём по биду (side='buy')."""
+        px = clob_price(self.s, tok, "sell" if side == "BUY" else "buy")
+        if px is not None:
+            return px                                       # лучший ASK / BID — спред учтён
+        mid = self._mid(tok)                                # откат: мид ± слиппедж
+        if mid is None or not (0 < mid < 1):
+            return None
+        return round(mid + self.slip, 4) if side == "BUY" else round(max(0.001, mid - self.slip), 4)
+
     def place_market_order(self, token_id, side, amount=None, shares=None,
                            order_type=None, max_price=None):
-        mid = self._mid(token_id)
-        if mid is None or not (0 < mid < 1):
-            raise Exception("paper: midpoint недоступен")
+        # 1) пробуем РЕАЛЬНЫЙ филл по стакану (VWAP + глубина + частичное исполнение)
+        deep = clob_fill(self.s, token_id, side,
+                         usd=float(amount) if side == "BUY" else None,
+                         shares=float(shares) if side != "BUY" else None)
+        if deep:
+            fill, got_sh, _full = deep
+        else:                                               # откат: лучшая цена стороны / мид±slip
+            fill = self._fill_px(token_id, side)
+            got_sh = (float(amount) / fill) if (fill and side == "BUY") else float(shares or 0)
+        if fill is None or not (0 < fill < 1):
+            raise Exception("paper: стакан недоступен")
+        mid = fill                                          # цена нашего исполнения (для журнала)
         if side == "BUY":
-            fill = round(mid + self.slip, 4)
             if max_price and fill > max_price + 1e-9:      # как реальный FAK-no-fill -> спокойный пропуск
                 raise Exception("no orders found to match with FAK order")
-            sh = float(amount) / fill
+            sh = got_sh                                     # сколько долей реально дал стакан
+            spent = round(sh * fill, 4)                     # частичный филл -> тратим меньше
             pos = self.p["pos"].setdefault(token_id, {"shares": 0.0, "cost": 0.0})
             pos["shares"] += sh
-            pos["cost"] = round(pos["cost"] + float(amount), 4)
-            self.p["cash"] = round(self.p["cash"] - float(amount), 2)
+            pos["cost"] = round(pos["cost"] + spent, 4)
+            self.p["cash"] = round(self.p["cash"] - spent, 2)
             self.p["buys"] += 1
         else:                                              # SELL
             pos = self.p["pos"].get(token_id)
             if pos and pos["shares"] > 0:
-                sh = min(float(shares), pos["shares"])
+                sh = min(float(shares), pos["shares"], got_sh or float(shares))
                 proceeds = sh * mid
                 cost_part = pos["cost"] * (sh / pos["shares"])
                 self.p["realized"] = round(self.p["realized"] + proceeds - cost_part, 2)
