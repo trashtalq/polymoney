@@ -101,7 +101,7 @@ def load_env():
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
         "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS", "EXIT_MIN_FRAC",
         "SIGNALS_TOKEN", "TG_ENABLED", "TG_TOKEN", "TG_CHAT", "TG_TAG", "TG_SUMMARY_H",
-        "TG_DAILY_AT")})
+        "TG_DAILY_AT", "TG_PAPER")})
     return cfg
 
 
@@ -111,8 +111,20 @@ def load_env():
 _TG = {"on": False, "token": "", "chat": "", "tag": "", "sess": None, "fails": 0}
 
 
+def _yes(v):
+    return str(v or "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def tg_init(cfg, mode=""):
-    _TG["on"] = str(cfg.get("TG_ENABLED") or "0").strip() in ("1", "true", "yes", "on")
+    _TG["on"] = _yes(cfg.get("TG_ENABLED"))
+    # В КАНАЛ ПИШЕТ ТОЛЬКО РЕАЛЬНЫЙ БОТ (решение пользователя). Виртуальные контуры (paper/dry)
+    # молчат независимо от того, как запущены — из пульта или напрямую. Осознанное исключение:
+    # TG_PAPER=1 в polymarket.env (тогда шлют, но с явной меткой «виртуальные»).
+    if _TG["on"] and mode in ("paper", "dry") and not _yes(cfg.get("TG_PAPER")):
+        _TG["on"] = False
+        print(f"Telegram: контур '{mode}' в канал НЕ пишет (пишет только реальный бот). "
+              f"Включить: TG_PAPER=1", flush=True)
+        return False
     _TG["token"] = (cfg.get("TG_TOKEN") or "").strip()
     _TG["chat"] = (cfg.get("TG_CHAT") or "").strip()
     # МЕТКА КОНТУРА обязательна: реальный и теневой боты пишут в один канал, и без неё сообщения
