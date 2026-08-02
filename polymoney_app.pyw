@@ -730,6 +730,10 @@ class App(tk.Tk):
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["MODE"] = "paper"                        # переопределяет MODE из файла для ЭТОГО процесса
+        # СВОЙ журнал исполненного! Иначе теневой и реальный бот пишут в один live_exec_state.json
+        # и на Windows os.replace падает с PermissionError (файл занят другим процессом).
+        env["STATE_FILE"] = "paper_exec_state.json"
+        env["HOLD_FILE"] = "hold_only_paper.json"
         flags = 0x08000000 if os.name == "nt" else 0
         try:
             self.paper_proc = subprocess.Popen(

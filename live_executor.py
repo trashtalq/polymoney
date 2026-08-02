@@ -161,10 +161,21 @@ def st_load():
 
 def st_save(s):
     # атомарно (tmp + replace): обрыв в момент записи не бьёт файл «что уже исполнено» —
-    # его порча означала бы ПОВТОРНЫЕ покупки уже отработанных сигналов
+    # его порча означала бы ПОВТОРНЫЕ покупки уже отработанных сигналов.
+    # На Windows os.replace может кратко падать PermissionError (файл открыт антивирусом/
+    # индексатором/пультом) — ретраим, и НЕ роняем бота из-за проблемы с записью лога.
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, STATE_FILE)
+    for attempt in range(5):
+        try:
+            tmp.write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, STATE_FILE)
+            return
+        except PermissionError:
+            time.sleep(0.3 * (attempt + 1))
+        except Exception as ex:  # noqa: BLE001
+            print(f"  !! не удалось сохранить состояние ({ex}) — продолжаю", flush=True)
+            return
+    print("  !! состояние не сохранилось (файл занят) — продолжаю, повторю в след. цикле", flush=True)
 
 
 def sig_key(sig):
