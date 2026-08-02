@@ -274,6 +274,11 @@ def fetch_held(s, funder):
         a = str(p.get("asset") or "")
         if not a:
             continue
+        if p.get("redeemable"):
+            # РЕЗОЛВНУТАЯ позиция: рынок закрыт, риска больше нет — это НЕ занятая экспозиция.
+            # Раньше такие считались «деньгами в открытых позах» и (а) завышали занятость лимитов
+            # (бот зря блокировал входы), (б) раздували сводку. Пропускаем.
+            continue
         cost = p.get("initialValue")
         if cost is None:
             cost = (p.get("size") or 0) * (p.get("avgPrice") or 0)
@@ -685,6 +690,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                     state["spent_by_wallet"][sig_w] = state["spent_by_wallet"].get(sig_w, 0.0) + stake
                     state["spent_total"] = round(state["spent_total"] + stake, 2)
                     state["spent_day"] = round(state["spent_day"] + stake, 2)
+                    state["n_buys"] = int(state.get("n_buys", 0)) + 1   # РЕАЛЬНЫЕ покупки (не done)
                     smoke_done = True
                     st_save(state)
                     if mode == "smoke":
@@ -785,10 +791,12 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                         f"реализовано: {pstate['realized']:+,.2f}$ · открытых: {len(pstate['pos'])}\n"
                         f"сделок: {pstate['buys']} входов / {pstate['sells']} выходов")
             else:
+                # held уже без резолвнутых -> это ЖИВЫЕ позиции и реальная занятая экспозиция
                 inv = sum(v.get("usd", 0.0) for v in held.values())
-                tg_send(f"📊 <b>ИТОГ</b>\nв открытых позициях: <b>${inv:,.2f}</b> "
-                        f"({len(held)} шт)\nпотрачено сегодня: ${state.get('spent_day', 0):.2f}\n"
-                        f"всего входов: {len(state.get('done', []))}")
+                tg_send(f"📊 <b>ИТОГ</b>\nоткрытых позиций: <b>{len(held)}</b> на <b>${inv:,.2f}</b>\n"
+                        f"потрачено сегодня: ${state.get('spent_day', 0):.2f}\n"
+                        f"покупок за всё время: {int(state.get('n_buys', 0))}\n"
+                        f"свободно из лимита ${deposit:g}: ${max(0.0, deposit - inv):,.2f}")
         time.sleep(poll)
 
 
