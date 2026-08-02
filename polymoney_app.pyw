@@ -39,6 +39,10 @@ PAPER = HERE / "paper15k_state.json"           # состояние тенево
 UPTIME_FILE = HERE / "paper_uptime.json"       # накопленное время работы теневого (переживает рестарты)
 HOLD_FILE = HERE / "hold_only.json"            # реал: режим «держим» (стоп входов, выходы работают)
 HOLD_FILE_PAPER = HERE / "hold_only_paper.json"   # теневой: то же
+# ── контур «Лучшие»: свой allowlist + своё состояние (тестируем отобранных изолированно) ──
+BEST_ALLOW = HERE / "best_allowlist.json"
+BEST_STATE = HERE / "best15k_state.json"
+BEST_EXEC_STATE = HERE / "best_exec_state.json"
 SETTINGS = HERE / "app_settings.json"          # {server, pw} — локально, в gitignore
 BOT = HERE / "live_executor.py"
 ALLOW_FILE = HERE / "copy_allowlist.json"      # белый список бота — держим в синхроне с копи
@@ -166,6 +170,7 @@ class App(tk.Tk):
         self.minsize(880, 640)
         self.proc = None
         self.paper_proc = None     # теневой (paper) бот — отдельный процесс
+        self.best_proc = None      # контур «Лучшие» — свой allowlist/банк/состояние
         self.paper_started = None   # старт ТЕКУЩЕЙ сессии теневого (None = стоит)
         self.paper_uptime = self._load_uptime()   # накопленное время работы за всё время (сек)
         self._uptime_save_t = 0
@@ -186,6 +191,7 @@ class App(tk.Tk):
         self.after(300, lambda: self.refresh_wallets(quiet=True))
         self.after(700, self._poll_account)
         self.after(900, self._refresh_paper_stats)
+        self.after(950, self._refresh_best_stats)
         self.after(1000, self._tick_paper_timer)
         self._paint_hold(False)                     # начальное состояние кнопок «держим»
         self._paint_hold(True)
@@ -269,9 +275,12 @@ class App(tk.Tk):
         real = ttk.Frame(self.nb, padding=10)
         paper = ttk.Frame(self.nb, padding=10)
         positions = ttk.Frame(self.nb, padding=10)
+        best = ttk.Frame(self.nb, padding=10)
         self.nb.add(real, text="  💰 Реал  ")
         self.nb.add(paper, text="  🌗 Теневой $15k  ")
+        self.nb.add(best, text="  ⭐ Лучшие  ")
         self.nb.add(positions, text="  📋 Позиции теневого  ")
+        self._build_best(best)
         self._build_real(real)
         self._build_paper(paper)
         self._build_positions(positions)
@@ -462,6 +471,72 @@ class App(tk.Tk):
             self.plog.tag_configure(tag, foreground=col)
         self._log_raw("Теневой бот: те же кошельки на виртуальный $15k. Жми «Запустить».",
                       "cyan", self.plog)
+
+    # ── вкладка «⭐ Лучшие»: отобранный состав, свой контур (allowlist+банк+статистика) ──
+    def _build_best(self, root):
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(3, weight=1)
+        bar = ttk.Frame(root, style="Card.TFrame", padding=12)
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.bstart_btn = ttk.Button(bar, text="▶  Запустить тест", style="Accent.TButton",
+                                     command=self.toggle_best)
+        self.bstart_btn.pack(side="left")
+        self.bdot = tk.Canvas(bar, width=14, height=14, bg=PANEL, highlightthickness=0)
+        self.bdot.pack(side="left", padx=(16, 6))
+        self._bdot_id = self.bdot.create_oval(2, 2, 12, 12, fill=MUT, outline="")
+        self.bstat_lbl = ttk.Label(bar, text="остановлен", style="Stat.TLabel")
+        self.bstat_lbl.pack(side="left")
+        ttk.Label(bar, text="  · отобранные кошельки, без флипперов · виртуальный банк",
+                  style="Card.TLabel").pack(side="left")
+
+        sc = ttk.Labelframe(root, text="  СЧЁТ ТЕСТА  ", padding=14)
+        sc.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        for i in range(6):
+            sc.columnconfigure(i, weight=1)
+        self.bcards = {}
+        for i, (key, cap) in enumerate([("equity", "Банк $"), ("pnl", "PnL $"), ("roi", "ROI %"),
+                                        ("realized", "Реализ $"), ("pos", "Позиций"), ("trades", "Сделок")]):
+            ttk.Label(sc, text=cap, style="Field.TLabel").grid(row=0, column=i, sticky="w", padx=(0, 12))
+            lbl = ttk.Label(sc, text="—", style="Money.TLabel")
+            lbl.grid(row=1, column=i, sticky="w", padx=(0, 12))
+            self.bcards[key] = lbl
+        self.bupd_lbl = ttk.Label(sc, text="ещё не запускался", style="Field.TLabel")
+        self.bupd_lbl.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
+
+        wf = ttk.Labelframe(root, text="  СОСТАВ (лучшие) — можно править  ", padding=10)
+        wf.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        wf.columnconfigure(0, weight=1)
+        add = ttk.Frame(wf, style="Card.TFrame")
+        add.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        add.columnconfigure(0, weight=1)
+        self.baddr_var = tk.StringVar()
+        ttk.Entry(add, textvariable=self.baddr_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(add, text="+ Добавить", style="Small.TButton",
+                   command=self.best_add).grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(add, text="✕ Убрать", style="Small.TButton",
+                   command=self.best_remove).grid(row=0, column=2, padx=(6, 0))
+        self.blist = tk.Listbox(wf, height=6, bg=CARD, fg=TXT, relief="flat",
+                                highlightthickness=0, selectbackground="#173049",
+                                selectforeground=ACC, font=("Consolas", 9))
+        self.blist.grid(row=1, column=0, sticky="ew")
+
+        logf = ttk.Labelframe(root, text="  ЛОГ ТЕСТА  ", padding=(10, 8))
+        logf.grid(row=3, column=0, sticky="nsew")
+        logf.columnconfigure(0, weight=1)
+        logf.rowconfigure(0, weight=1)
+        self.blog = tk.Text(logf, bg=CARD, fg=TXT, insertbackground=TXT, relief="flat",
+                            font=("Consolas", 10), padx=10, pady=8, wrap="word",
+                            highlightthickness=0, state="disabled")
+        self.blog.grid(row=0, column=0, sticky="nsew")
+        bsb = ttk.Scrollbar(logf, command=self.blog.yview)
+        bsb.grid(row=0, column=1, sticky="ns")
+        self.blog["yscrollcommand"] = bsb.set
+        for tag, col in (("green", GRN), ("red", RED), ("amber", AMB),
+                         ("cyan", ACC), ("muted", MUT), ("text", TXT)):
+            self.blog.tag_configure(tag, foreground=col)
+        self._best_reload_list()
+        self._log_raw("Тест лучших: отобранные кошельки (флипперы исключены). Жми «Запустить тест».",
+                      "cyan", self.blog)
 
     # ── вкладка «Позиции теневого»: НАШИ цены входа/выхода + потеря на задержке (сверка с Polymarket) ──
     def _build_positions(self, root):
@@ -770,11 +845,14 @@ class App(tk.Tk):
                     if src == "paper" and self.paper_proc:
                         self._log_raw("⚠ Теневой завершился.", "amber", self.plog)
                         self.stop_paper()
+                    elif src == "best" and self.best_proc:
+                        self._log_raw("⚠ Тест завершился.", "amber", self.blog)
+                        self.stop_best()
                     elif src == "real" and self.proc:
                         self._log_raw("⚠ Бот завершился.", "amber")
                         self.stop_bot()
                 else:
-                    self._log(line, self.plog if src == "paper" else None)
+                    self._log(line, {"paper": self.plog, "best": self.blog}.get(src))
         except queue.Empty:
             pass
         self.after(150, self._pump)
@@ -828,6 +906,109 @@ class App(tk.Tk):
         except Exception:  # noqa: BLE001
             pass
         self.after(3000, self._refresh_status)
+
+    # ───────────────────── контур «Лучшие» ─────────────────────
+    def _best_load(self):
+        try:
+            return [str(w).lower() for w in json.loads(BEST_ALLOW.read_text(encoding="utf-8"))]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _best_save(self, lst):
+        BEST_ALLOW.write_text(json.dumps(sorted(set(lst)), indent=1), encoding="utf-8")
+
+    def _best_reload_list(self):
+        self.blist.delete(0, "end")
+        for w in self._best_load():
+            self.blist.insert("end", w)
+
+    def best_add(self):
+        a = self.baddr_var.get().strip().lower()
+        if not (a.startswith("0x") and len(a) == 42):
+            messagebox.showerror("Адрес", "Нужен адрес вида 0x… (42 символа).")
+            return
+        lst = self._best_load(); lst.append(a); self._best_save(lst)
+        self.baddr_var.set("")
+        self._best_reload_list()
+        self._log_raw(f"➕ В тест добавлен {a[:10]}…", "green", self.blog)
+
+    def best_remove(self):
+        sel = self.blist.curselection()
+        if not sel:
+            messagebox.showinfo("Выбери кошелёк", "Кликни строку в списке состава.")
+            return
+        a = self.blist.get(sel[0])
+        self._best_save([w for w in self._best_load() if w != a])
+        self._best_reload_list()
+        self._log_raw(f"✕ Из теста убран {a[:10]}…", "red", self.blog)
+
+    def toggle_best(self):
+        if self.best_proc:
+            self.stop_best()
+        else:
+            self.start_best()
+
+    def start_best(self):
+        if not BOT.exists():
+            return
+        if not self._best_load():
+            messagebox.showwarning("Пустой состав", "Добавь хотя бы один кошелёк в состав теста.")
+            return
+        self.save_paper_limits(silent=True)          # тест идёт на PAPER_*-лимитах
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["MODE"] = "paper"                        # виртуальные деньги, реальные кэфы
+        env["ALLOWLIST_FILE"] = BEST_ALLOW.name      # СВОЙ состав
+        env["PAPER_STATE_FILE"] = BEST_STATE.name    # СВОЙ виртуальный счёт
+        env["STATE_FILE"] = BEST_EXEC_STATE.name     # СВОЙ журнал исполненного
+        env["HOLD_FILE"] = "hold_only_best.json"
+        flags = 0x08000000 if os.name == "nt" else 0
+        try:
+            self.best_proc = subprocess.Popen(
+                [sys.executable, str(BOT)], cwd=str(HERE),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                creationflags=flags, text=True, encoding="utf-8", errors="replace", bufsize=1)
+        except Exception as ex:  # noqa: BLE001
+            messagebox.showerror("Не запустилось", str(ex))
+            self.best_proc = None
+            return
+        threading.Thread(target=self._reader, args=(self.best_proc, "best"), daemon=True).start()
+        self.bstart_btn.config(text="■  Остановить тест", style="Stop.TButton")
+        self.bdot.itemconfig(self._bdot_id, fill=ACC)
+        self.bstat_lbl.config(text="работает")
+        self._log_raw(f"▶ Тест запущен: {len(self._best_load())} кошельков, виртуальный банк.",
+                      "cyan", self.blog)
+
+    def stop_best(self):
+        if self.best_proc:
+            try:
+                self.best_proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        self.best_proc = None
+        self.bstart_btn.config(text="▶  Запустить тест", style="Accent.TButton")
+        self.bdot.itemconfig(self._bdot_id, fill=MUT)
+        self.bstat_lbl.config(text="остановлен")
+        self._log_raw("■ Тест остановлен.", "muted", self.blog)
+
+    def _refresh_best_stats(self):
+        try:
+            if BEST_STATE.exists():
+                p = json.loads(BEST_STATE.read_text(encoding="utf-8"))
+                self.bcards["equity"].config(text=f"{p.get('equity', p.get('bankroll', 0)):,.0f}")
+                self.bcards["pnl"].config(text=f"{p.get('pnl', 0):+,.0f}")
+                self.bcards["roi"].config(text=f"{p.get('roi', 0):+.1f}")
+                self.bcards["realized"].config(text=f"{p.get('realized', 0):+,.0f}")
+                self.bcards["pos"].config(text=f"{len(p.get('pos', {}))}")
+                self.bcards["trades"].config(text=f"{p.get('buys', 0)}/{p.get('sells', 0)}")
+                ts = p.get("ts", 0)
+                ago = int(time.time()) - ts if ts else 0
+                self.bupd_lbl.config(text=(f"обновлено {ago} сек назад" if ts else "ещё не запускался")
+                                     + f"  ·  старт ${p.get('bankroll', 0):,.0f}"
+                                     + f"  ·  состав {len(self._best_load())}")
+        except Exception:  # noqa: BLE001
+            pass
+        self.after(3000, self._refresh_best_stats)
 
     def _refresh_paper_stats(self):
         try:
@@ -1042,11 +1223,12 @@ class App(tk.Tk):
         self.refresh_wallets()
 
     def _on_close(self):
-        if (self.proc or self.paper_proc) and not messagebox.askyesno(
+        if (self.proc or self.paper_proc or self.best_proc) and not messagebox.askyesno(
                 "Боты работают", "Бот(ы) ещё запущены. Остановить и выйти?"):
             return
         self.stop_bot()
         self.stop_paper()
+        self.stop_best()
         if self._client is not None:
             try:
                 self._client.close()

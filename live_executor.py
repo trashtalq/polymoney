@@ -35,8 +35,10 @@ from pathlib import Path
 import requests
 
 HERE = Path(__file__).resolve().parent
-STATE_FILE = HERE / "live_exec_state.json"      # что уже исполнено + счётчики дня (локально)
-ALLOW_FILE = HERE / "copy_allowlist.json"       # белый список кошельков (защита от инъекции сигналов)
+# Имена файлов состояния можно переопределить через env — так рядом крутятся НЕСКОЛЬКО контуров
+# (реал / теневой ядра / теневой «лучших») каждый со своим allowlist, состоянием и флагом «держим».
+STATE_FILE = HERE / (os.environ.get("STATE_FILE") or "live_exec_state.json")
+ALLOW_FILE = HERE / (os.environ.get("ALLOWLIST_FILE") or "copy_allowlist.json")
 _ALLOW = {"mtime": 0, "set": set()}
 
 
@@ -56,8 +58,9 @@ def load_allowlist() -> set:
 
 def hold_only(paper=False) -> bool:
     """Режим «ДЕРЖИМ»: новые входы на паузе, но выходы за целью работают и позиции доживают.
-    Горячий флаг (без рестарта): hold_only_paper.json / hold_only.json {"hold": true}."""
-    f = HERE / ("hold_only_paper.json" if paper else "hold_only.json")
+    Горячий флаг (без рестарта). Имя файла можно задать env HOLD_FILE (свой на каждый контур)."""
+    f = HERE / (os.environ.get("HOLD_FILE")
+                or ("hold_only_paper.json" if paper else "hold_only.json"))
     try:
         return bool(json.loads(f.read_text(encoding="utf-8")).get("hold"))
     except Exception:  # noqa: BLE001
@@ -178,7 +181,7 @@ def fetch_held(s, funder):
 
 
 # ════════════ ТЕНЕВОЙ (PAPER) РЕЖИМ: тот же бот на виртуальный банкролл, реальные кэфы ════════════
-PAPER_FILE = HERE / "paper15k_state.json"
+PAPER_FILE = HERE / (os.environ.get("PAPER_STATE_FILE") or "paper15k_state.json")
 
 
 def pst_load(bankroll):

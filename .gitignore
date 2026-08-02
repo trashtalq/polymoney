@@ -80,3 +80,9 @@ paused_wallets.json
 wallet_filters.json
 copy_allowlist.json           # локальный белый список кошельков бота (защита от инъекции сигналов)
 .env                          # серверный ADMIN_PASS для docker compose — НИКОГДА в репо
+
+# контур «Лучшие» (тест отобранного состава, локально)
+best_allowlist.json
+best15k_state.json
+best_exec_state.json
+hold_only_best.json
