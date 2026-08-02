@@ -492,8 +492,13 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
         try:
             allow = load_allowlist()                   # копи-набор = локальный allowlist (источник правды)
             params = {"since": state["last_t"]}
-            if allow:                                  # лента РОВНО по нашим кошелькам (из main-книги)
-                params["wallets"] = ",".join(sorted(allow))
+            if allow:
+                # Лента по нашим кошелькам ПЛЮС те, чьи позиции мы ЕЩЁ ДЕРЖИМ. Иначе, убрав кошелёк
+                # из состава, мы перестали бы получать его ВЫХОДЫ и уже открытые позиции зависли бы
+                # до резолва. Новые ВХОДЫ всё равно гейтятся по allow (проверка ниже) — добавка
+                # влияет только на мирроринг выходов по унаследованным позициям.
+                hold_ws = {w for t, w in (state.get("tok_wallet") or {}).items() if t in held and w}
+                params["wallets"] = ",".join(sorted(set(allow) | hold_ws))
             else:                                      # allowlist пуст -> лента группы (fallback)
                 params["g"] = group
             r = s.get(f"{server}/api/signals", params=params, timeout=25).json()
