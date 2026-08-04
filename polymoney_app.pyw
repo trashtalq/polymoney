@@ -931,6 +931,8 @@ class App(tk.Tk):
             tag, icon = "amber", "🌐"                # сетевой блип — не тревога, само повторится
         elif any(x in low for x in ("!!", "стоп", "не прош", "недоступ", "ошиб", "error", "traceback")):
             tag, icon = "red", "⛔"
+        elif "выход цели" in low and ("нет" in low or "мелкий" in low):
+            tag, icon = "muted", "⏭"          # выход цели, который нас не касается — не тревога
         elif "выход" in low or "продал" in low or "sell" in low:
             tag, icon = "amber", "🔴"
         elif "куп" in low or "ордер:" in low or "[live]" in low or "[dry]" in low or "[smoke]" in low:

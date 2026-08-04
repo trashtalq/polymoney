@@ -781,6 +781,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             tok = ex.get("tok", "")
             xtitle = (ex.get("title") or "")[:48]
             if (ex.get("frac") or 1.0) < exit_min_frac:       # цель вышла лишь частично -> ждём
+                print(f"  выход цели мелкий ({(ex.get('frac') or 0)*100:.0f}% < "
+                      f"{exit_min_frac*100:.0f}%) — держим: {xtitle[:36]}", flush=True)
                 state["done"].append(xk)
                 continue
             shares = math.floor(held.get(tok, {}).get("shares", 0.0) * 100) / 100   # вниз, не оверселл
@@ -788,6 +790,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             hs = held.get(tok, {}).get("shares", 0.0)
             entry_avg = (invested / hs) if hs else 0          # НАША средняя цена входа
             if shares <= 0:                                   # мы это не держим -> нечего продавать
+                print(f"  выход цели, но позиции у нас нет (не копировали вход): {xtitle[:40]}",
+                      flush=True)
                 state["done"].append(xk)
                 continue
             if mode == "smoke":
