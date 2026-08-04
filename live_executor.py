@@ -101,7 +101,7 @@ def load_env():
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
         "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS", "EXIT_MIN_FRAC",
         "SIGNALS_TOKEN", "TG_ENABLED", "TG_TOKEN", "TG_CHAT", "TG_TAG", "TG_SUMMARY_H",
-        "TG_DAILY_AT", "TG_PAPER", "DRIFT_EDGE", "DRIFT_MARGIN", "DRIFT_MAX_PRICE")})
+        "TG_DAILY_AT", "TG_PAPER", "DRIFT_EDGE", "DRIFT_MARGIN", "DRIFT_MAX_PRICE", "DRIFT_MIN")})
     return cfg
 
 
@@ -493,7 +493,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
              max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
              signals_token="", min_price=0.12, paper=False, pstate=None,
              chase_match=False, chase_max_mult=2.0, summary_h=24.0, daily_at_min=1410,
-             drift_edge=0.22, drift_margin=0.03, drift_max_price=0.70):
+             drift_edge=0.22, drift_margin=0.03, drift_max_price=0.70, drift_min=0.02):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -635,13 +635,19 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             # плюс ЖЁСТКИЙ потолок drift_max_price (выше него не берём вообще — там апсайда нет).
             # Пример: цель 0.30 -> берём до ~0.50; цена уже 0.70 -> НЕ берём (EV -27%).
             cur_mid = clob_mid(s, sig["tok"])
-            allowed = min(max_price, drift_max_price, (px + drift_edge) / (1 + drift_margin))
-            if cur_mid and cur_mid > allowed + 1e-9:
-                ev = (px + drift_edge) / cur_mid - 1
-                print(f"  skip (цена улетела {px:.3f}->{cur_mid:.3f}, потолок EV {allowed:.3f}, "
-                      f"EV {ev:+.0%}): {title}", flush=True)
-                state["done"].append(k)
-                continue
+            # ВАЖНО: гейт срабатывает ТОЛЬКО если цена ушла ВВЕРХ от цены цели. Если рынок стоит
+            # или упал — мы берём не хуже цели, догона нет, и ограничивать нечего (решают обычные
+            # MIN_PRICE/MAX_PRICE). Иначе бот отказывался от выгодных входов «цена улетела 0.845
+            # -> 0.835», хотя цена СНИЗИЛАСЬ.
+            allowed = max_price
+            if cur_mid and cur_mid > px + drift_min:       # цена убежала ЗАМЕТНО (не тик шума)
+                allowed = min(max_price, drift_max_price, (px + drift_edge) / (1 + drift_margin))
+                if cur_mid > allowed + 1e-9:
+                    ev = (px + drift_edge) / cur_mid - 1
+                    print(f"  skip (догон невыгоден: цель {px:.3f} -> сейчас {cur_mid:.3f}, "
+                          f"потолок {allowed:.3f}, EV {ev:+.0%}): {title}", flush=True)
+                    state["done"].append(k)
+                    continue
             # ДОРАЗМЕР ПОД ЗАДЕРЖКУ («платим за лаг»): множим ставку на текущая/цена_цели, чтобы
             # взять столько же долей, сколько цель. Потолок множителя = chase_max_mult.
             stake = per_trade
@@ -918,6 +924,7 @@ def main():
     drift_edge = float(cfg.get("DRIFT_EDGE") or 0.22)
     drift_margin = float(cfg.get("DRIFT_MARGIN") or 0.03)
     drift_max_price = float(cfg.get("DRIFT_MAX_PRICE") or 0.70)
+    drift_min = float(cfg.get("DRIFT_MIN") or 0.02)   # сдвиг меньше этого = рыночный шум, не догон
 
     rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
     print(f"=== live_executor | MODE={mode.upper()} | лимит-в-позах ${deposit} | ставка ${per_trade} | "
@@ -959,7 +966,7 @@ def main():
                  paper=True, pstate=pstate, chase_match=p_chase, chase_max_mult=p_chase_mult,
                  summary_h=summary_h, daily_at_min=daily_at_min,
                  drift_edge=drift_edge, drift_margin=drift_margin,
-                 drift_max_price=drift_max_price)
+                 drift_max_price=drift_max_price, drift_min=drift_min)
         return
 
     if mode == "dry":
@@ -969,7 +976,7 @@ def main():
                  min_price=min_price, chase_match=chase_match, chase_max_mult=chase_max_mult,
                  summary_h=summary_h, daily_at_min=daily_at_min,
                  drift_edge=drift_edge, drift_margin=drift_margin,
-                 drift_max_price=drift_max_price)
+                 drift_max_price=drift_max_price, drift_min=drift_min)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -999,7 +1006,7 @@ def main():
                  signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=min_price,
                  chase_match=chase_match, chase_max_mult=chase_max_mult, summary_h=summary_h, daily_at_min=daily_at_min,
                  drift_edge=drift_edge, drift_margin=drift_margin,
-                 drift_max_price=drift_max_price)
+                 drift_max_price=drift_max_price, drift_min=drift_min)
 
 
 if __name__ == "__main__":
