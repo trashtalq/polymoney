@@ -88,3 +88,7 @@ best_exec_state.json
 hold_only_best.json
 
 copy_allowlist.backup-*.json
+flow_allowlist.json
+flow15k_state.json
+flow_exec_state.json
+hold_only_flow.json
