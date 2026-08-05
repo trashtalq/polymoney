@@ -584,7 +584,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
              chase_match=False, chase_max_mult=2.0, summary_h=24.0, daily_at_min=1410,
              drift_edge=0.22, drift_margin=0.03, drift_max_price=0.70, drift_min=0.02,
              risk_pct=True, risk_deploy=0.65, risk_trade=0.02, risk_day=0.15,
-             risk_wallet=0.10, risk_stop_dd=0.10, risk_trade_max=100.0):
+             risk_wallet=0.10, risk_stop_dd=0.10, risk_trade_max=100.0, direct_src=None):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -626,7 +626,13 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 params["wallets"] = ",".join(sorted(set(allow) | hold_ws))
             else:                                      # allowlist пуст -> лента группы (fallback)
                 params["g"] = group
-            r = s.get(f"{server}/api/signals", params=params, timeout=25).json()
+            if direct_src is not None and allow:
+                # ПРЯМОЙ ИСТОЧНИК: опрашиваем data-api сами -> латентность = интервал опроса
+                # (5-15с) вместо 45-90с через наш сервер. Формат ответа идентичен.
+                feed_ws = params["wallets"].split(",")
+                r = direct_src.fetch(state["last_t"], feed_ws)
+            else:
+                r = s.get(f"{server}/api/signals", params=params, timeout=25).json()
         except Exception as ex:  # noqa: BLE001
             print(f"[{time.strftime('%H:%M:%S')}] сервер недоступен ({ex})", flush=True)
             time.sleep(poll)
@@ -1077,6 +1083,17 @@ def main():
     risk_wallet = float(cfg.get("RISK_WALLET_PCT") or 0.10)   # экспозиция на один кошелёк
     risk_stop_dd = float(cfg.get("RISK_STOP_DD") or 0.10)     # стоп: просадка капитала за день
     risk_trade_max = float(cfg.get("RISK_TRADE_MAX") or 100)  # потолок ставки в $ (ликвидность!)
+    # ИСТОЧНИК СИГНАЛОВ: server (через наш сервер, задержка 45-90с) | direct (сами опрашиваем
+    # data-api, задержка = интервал опроса). direct кратно быстрее -> меньше проскальзывания.
+    direct_src = None
+    if (cfg.get("SIGNAL_SOURCE") or "server").strip().lower() == "direct":
+        try:
+            from direct_source import DirectSource
+            direct_src = DirectSource()
+            print("источник сигналов: ПРЯМОЙ (data-api) — минуем сервер, латентность ~интервал опроса",
+                  flush=True)
+        except Exception as ex:  # noqa: BLE001
+            print(f"!! прямой источник недоступен ({ex}) — работаем через сервер", flush=True)
 
     rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
     print(f"=== live_executor | MODE={mode.upper()} | лимит-в-позах ${deposit} | ставка ${per_trade} | "
@@ -1121,7 +1138,7 @@ def main():
                  drift_max_price=drift_max_price, drift_min=drift_min,
                  risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
                  risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
-                 risk_trade_max=risk_trade_max)
+                 risk_trade_max=risk_trade_max, direct_src=direct_src)
         return
 
     if mode == "dry":
@@ -1134,7 +1151,7 @@ def main():
                  drift_max_price=drift_max_price, drift_min=drift_min,
                  risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
                  risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
-                 risk_trade_max=risk_trade_max)
+                 risk_trade_max=risk_trade_max, direct_src=direct_src)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -1167,7 +1184,7 @@ def main():
                  drift_max_price=drift_max_price, drift_min=drift_min,
                  risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
                  risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
-                 risk_trade_max=risk_trade_max)
+                 risk_trade_max=risk_trade_max, direct_src=direct_src)
 
 
 if __name__ == "__main__":
