@@ -17,6 +17,7 @@ direct_source.py — ПРЯМОЙ источник сигналов из data-ap
 декодирования логов и обработки реоргов, поэтому делается отдельно и после обкатки этого шага.
 """
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -68,11 +69,16 @@ class DirectSource:
             return []
 
     def fetch(self, since, wallets):
-        """Одна «пачка» сигналов новее since по списку кошельков. Формат = /api/signals."""
+        """Одна «пачка» сигналов новее since по списку кошельков. Формат = /api/signals.
+        Кошельки опрашиваются ПАРАЛЛЕЛЬНО: последовательно 7 запросов занимали ~2.3с, и это
+        время целиком уходило в задержку копирования. Параллельно — ~время одного запроса."""
         signals, exits = [], []
-        for w in wallets:
-            wl = str(w).lower()
-            for e in self._activity(wl):
+        wl_list = [str(w).lower() for w in wallets]
+        workers = max(1, min(12, len(wl_list)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            acts = dict(zip(wl_list, pool.map(self._activity, wl_list)))
+        for wl in wl_list:
+            for e in acts.get(wl, []):
                 if not isinstance(e, dict) or (e.get("type", "") or "").upper() != "TRADE":
                     continue
                 ts = int(e.get("timestamp") or 0)
