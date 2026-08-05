@@ -101,7 +101,9 @@ def load_env():
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
         "MAX_ENTRIES_PER_POS", "MAX_PER_WALLET_DAY", "MAX_RESOLVE_DAYS", "EXIT_MIN_FRAC",
         "SIGNALS_TOKEN", "TG_ENABLED", "TG_TOKEN", "TG_CHAT", "TG_TAG", "TG_SUMMARY_H",
-        "TG_DAILY_AT", "TG_PAPER", "DRIFT_EDGE", "DRIFT_MARGIN", "DRIFT_MAX_PRICE", "DRIFT_MIN")})
+        "TG_DAILY_AT", "TG_PAPER", "DRIFT_EDGE", "DRIFT_MARGIN", "DRIFT_MAX_PRICE", "DRIFT_MIN", "RISK_PCT",
+        "RISK_DEPLOY_PCT", "RISK_TRADE_PCT", "RISK_DAY_PCT", "RISK_WALLET_PCT", "RISK_STOP_DD",
+        "RISK_TRADE_MAX")})
     return cfg
 
 
@@ -162,6 +164,84 @@ def tg_send(text, silent=False):
     except Exception:  # noqa: BLE001
         _TG["fails"] += 1
         return False
+
+
+def resp_reason(resp):
+    """Почему ордер отклонён: RejectedOrder.code (fak_not_filled / not_enough_balance / …)."""
+    return str(getattr(resp, "code", "") or getattr(resp, "message", "") or "")
+
+
+def resp_filled_usd(resp, side, fallback):
+    """СКОЛЬКО РЕАЛЬНО исполнилось в $. У AcceptedOrder: making_amount = что мы отдали
+    (для BUY это USDC), taking_amount = что получили (для SELL это USDC). FAK часто наливается
+    ЧАСТИЧНО — раньше в счётчики шла полная задуманная ставка, и лимиты «протекали»."""
+    try:
+        v = getattr(resp, "making_amount" if side == "BUY" else "taking_amount", None)
+        v = float(v) if v is not None else 0.0
+        return v if v > 0 else float(fallback)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def resp_filled_shares(resp, side, fallback):
+    """Сколько ДОЛЕЙ реально прошло: BUY -> taking_amount, SELL -> making_amount."""
+    try:
+        v = getattr(resp, "taking_amount" if side == "BUY" else "making_amount", None)
+        v = float(v) if v is not None else 0.0
+        return v if v > 0 else float(fallback)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+# ───────────────── РИСК-ДВИЖОК: лимиты от РЕАЛЬНОГО капитала + стоп по просадке ─────────────────
+def account_equity(s, client, funder):
+    """Капитал счёта = свободный USDC + текущая стоимость ЖИВЫХ позиций.
+    Возвращает (equity, cash, positions_value). Без этого лимиты задаются «на глаз» в env и
+    легко оказываются отключёнными (реальный случай: DEPOSIT=200000 при $40 на счету)."""
+    cash = 0.0
+    try:
+        ba = client.get_balance_allowance(asset_type="COLLATERAL")
+        cash = int(getattr(ba, "balance", 0)) / 1e6
+    except Exception:  # noqa: BLE001
+        pass
+    pv = 0.0
+    try:
+        pos = s.get(f"https://data-api.polymarket.com/positions?user={funder}&limit=500",
+                    timeout=15).json()
+        for p in pos if isinstance(pos, list) else []:
+            if not p.get("redeemable"):
+                pv += float(p.get("currentValue") or 0)
+    except Exception:  # noqa: BLE001
+        pass
+    return round(cash + pv, 2), round(cash, 2), round(pv, 2)
+
+
+def redeem_won(s, client, funder, state, limit=8):
+    """ЗАБРАТЬ выигранные позиции: резолвнутые доли надо редимить, иначе деньги висят мёртвым
+    грузом — бот считает капитал свободным, а кэша на счету нет и ордера отбиваются."""
+    try:
+        pos = s.get(f"https://data-api.polymarket.com/positions?user={funder}&limit=500",
+                    timeout=15).json()
+    except Exception:  # noqa: BLE001
+        return 0
+    done = set(state.get("redeemed") or [])
+    cids, got = [], 0
+    for p in pos if isinstance(pos, list) else []:
+        cid = str(p.get("conditionId") or "")
+        if p.get("redeemable") and cid and cid not in done and float(p.get("size") or 0) > 0:
+            if cid not in cids:
+                cids.append(cid)
+    for cid in cids[:limit]:
+        try:
+            client.redeem_positions(condition_id=cid)
+            done.add(cid)
+            got += 1
+            print(f"  [REDEEM] забрали резолвнутую позицию (cid…{cid[-6:]})", flush=True)
+            time.sleep(0.4)
+        except Exception as ex:  # noqa: BLE001
+            print(f"  redeem не прошёл ({str(ex)[:80]}) — повторим позже", flush=True)
+    state["redeemed"] = list(done)[-500:]
+    return got
 
 
 def _mkt_link(title, cid=""):
@@ -474,7 +554,16 @@ class PaperClient:
 
 
 def resp_ok(resp):
-    """Успех ордера по ответу нового SDK (OrderResponse — типизированный объект, не dict)."""
+    """Успех ордера. КРИТИЧНО: у SDK поле называется `ok` (AcceptedOrder.ok=True /
+    RejectedOrder.ok=False). Раньше проверялось несуществующее `success`, до `ok` дело не доходило,
+    и функция сваливалась в `return True` -> ОТКЛОНЁННЫЕ ордера (в т.ч. fak_not_filled,
+    not_enough_balance) считались КУПЛЕННЫМИ: бот отмечал сигнал исполненным, крутил счётчики
+    трат и думал, что держит позицию, которой нет."""
+    ok = getattr(resp, "ok", None)
+    if ok is True:
+        return True
+    if ok is False:
+        return False
     for attr in ("success",):
         v = getattr(resp, attr, None)
         if v is True:
@@ -493,7 +582,9 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
              max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
              signals_token="", min_price=0.12, paper=False, pstate=None,
              chase_match=False, chase_max_mult=2.0, summary_h=24.0, daily_at_min=1410,
-             drift_edge=0.22, drift_margin=0.03, drift_max_price=0.70, drift_min=0.02):
+             drift_edge=0.22, drift_margin=0.03, drift_max_price=0.70, drift_min=0.02,
+             risk_pct=True, risk_deploy=0.65, risk_trade=0.02, risk_day=0.15,
+             risk_wallet=0.10, risk_stop_dd=0.10, risk_trade_max=100.0):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -584,7 +675,41 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             state["day_sells"] = 0
 
         allow = load_allowlist()                      # белый список кошельков (перечитывается на лету)
-        holding = hold_only(paper)                     # горячий флаг «ДЕРЖИМ»: входы на паузе
+        # ── РИСК-ДВИЖОК (только реал): лимиты как % от КАПИТАЛА + стоп по дневной просадке ──
+        if not paper and funder and client and risk_pct and time.time() - state.get("risk_t", 0) > 120:
+            state["risk_t"] = time.time()
+            eq, cash_, pv_ = account_equity(s, client, funder)
+            if eq > 0:
+                state["equity"] = eq
+                if state.get("eq_day") != today:      # фиксируем капитал на начало дня
+                    state["eq_day"] = today
+                    state["eq_day_start"] = eq
+                    state["risk_halt"] = False
+                base = float(state.get("eq_day_start") or eq)
+                deposit = round(eq * risk_deploy, 2)          # максимум в позициях
+                # ставка: % от капитала, но НЕ выше потолка ликвидности. Замер стакана показал:
+                # ордер $10 -> VWAP 0.640, $500 -> 0.664 (2.4% проскальзывания), $5000 -> 0.895 (40%).
+                # Крупная ставка на тонком рынке сама съедает эдж, поэтому жёсткий кап.
+                per_trade = max(1.0, min(risk_trade_max, round(eq * risk_trade, 2)))
+                daily_max = round(eq * risk_day, 2)
+                max_per_wallet = round(eq * risk_wallet, 2)
+                cap_usd = max_entries * per_trade
+                dd = (eq - base) / base if base else 0
+                if dd <= -risk_stop_dd and not state.get("risk_halt"):
+                    state["risk_halt"] = True
+                    print(f"  !! СТОП-ЛОСС ДНЯ: капитал {eq:.2f} против {base:.2f} ({dd:+.1%}) — "
+                          f"входы остановлены до завтра", flush=True)
+                    tg_send(f"🛑 <b>СТОП ДНЯ</b>\nпросадка {dd:+.1%} (капитал ${eq:.2f} "
+                            f"против ${base:.2f})\nновые входы остановлены, позиции держим")
+                print(f"  [РИСК] капитал ${eq:.2f} (кэш ${cash_:.2f} + позиции ${pv_:.2f}) | "
+                      f"ставка ${per_trade:g} | в позах до ${deposit:g} | на кошелёк ${max_per_wallet:g}"
+                      + (" | ХОЛТ" if state.get("risk_halt") else ""), flush=True)
+            # забрать выигранные (иначе капитал заперт в резолвнутых позициях)
+            if time.time() - state.get("redeem_t", 0) > 900:
+                state["redeem_t"] = time.time()
+                redeem_won(s, client, funder, state)
+        # «ДЕРЖИМ» = ручной флаг ИЛИ сработавший стоп-лосс дня: входы стоп, выходы работают
+        holding = hold_only(paper) or bool(state.get("risk_halt"))
         if holding:
             print(f"[{time.strftime('%H:%M:%S')}] режим ДЕРЖИМ: новые входы на паузе, "
                   f"выходы за целью работают", flush=True)
@@ -720,7 +845,19 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                     order_type="FAK", max_price=cap)
                 ok = resp_ok(resp)
                 _tag = "PAPER" if paper else ("SMOKE" if mode == "smoke" else "LIVE")
-                print(f"  [{_tag}] ордер: {line}" + ("" if paper else f" -> {resp!r}"), flush=True)
+                if not ok:                                # ОТКЛОНЁН (fak_not_filled и т.п.)
+                    why = resp_reason(resp)
+                    if "fak" in why.lower() or "unmatched" in why.lower():
+                        print(f"  пропуск: не налилось по нашей цене ({why}) — {title}", flush=True)
+                        state["done"].append(k)           # рынок ушёл: не долбим повторами
+                    else:
+                        print(f"  !! ордер отклонён ({why}) — {title}", flush=True)
+                    st_save(state)
+                    continue
+                # РЕАЛЬНО исполнено (FAK часто наливается частично) — считаем по факту, не по замыслу
+                stake = round(resp_filled_usd(resp, "BUY", stake), 4) if not paper else stake
+                print(f"  [{_tag}] ордер: {line}" + ("" if paper else f" -> исполнено ${stake:g}"),
+                      flush=True)
                 if ok:
                     state["done"].append(k)
                     session_add[sig["tok"]] = session_add.get(sig["tok"], 0.0) + stake
@@ -836,6 +973,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             except Exception as ex2:  # noqa: BLE001
                 print(f"  !! выход не прошёл ({ex2}) — повторим позже", flush=True)
 
+        state["hb"] = int(time.time())               # heartbeat: пульт видит, что бот жив
+        state["hb_cycles"] = int(state.get("hb_cycles", 0)) + 1
         if len(state["done"]) > 4000:                # держим список исполненного компактным
             state["done"] = state["done"][-2000:]
         # карту токен->кошелёк чистим от закрытых позиций (их экспозиция уже освободилась)
@@ -929,6 +1068,15 @@ def main():
     drift_margin = float(cfg.get("DRIFT_MARGIN") or 0.03)
     drift_max_price = float(cfg.get("DRIFT_MAX_PRICE") or 0.70)
     drift_min = float(cfg.get("DRIFT_MIN") or 0.02)   # сдвиг меньше этого = рыночный шум, не догон
+    # РИСК ОТ КАПИТАЛА: лимиты считаются как % от equity (кэш+позиции) каждые 2 мин, а не из env
+    # «на глаз». RISK_PCT=0 -> старое поведение (фиксированные DEPOSIT/PER_TRADE_USD из env).
+    risk_pct = _yes(cfg.get("RISK_PCT") if cfg.get("RISK_PCT") is not None else "1")
+    risk_deploy = float(cfg.get("RISK_DEPLOY_PCT") or 0.65)   # максимум капитала в позициях
+    risk_trade = float(cfg.get("RISK_TRADE_PCT") or 0.02)     # ставка на сделку
+    risk_day = float(cfg.get("RISK_DAY_PCT") or 0.15)         # дневной оборот
+    risk_wallet = float(cfg.get("RISK_WALLET_PCT") or 0.10)   # экспозиция на один кошелёк
+    risk_stop_dd = float(cfg.get("RISK_STOP_DD") or 0.10)     # стоп: просадка капитала за день
+    risk_trade_max = float(cfg.get("RISK_TRADE_MAX") or 100)  # потолок ставки в $ (ликвидность!)
 
     rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
     print(f"=== live_executor | MODE={mode.upper()} | лимит-в-позах ${deposit} | ставка ${per_trade} | "
@@ -970,7 +1118,10 @@ def main():
                  paper=True, pstate=pstate, chase_match=p_chase, chase_max_mult=p_chase_mult,
                  summary_h=summary_h, daily_at_min=daily_at_min,
                  drift_edge=drift_edge, drift_margin=drift_margin,
-                 drift_max_price=drift_max_price, drift_min=drift_min)
+                 drift_max_price=drift_max_price, drift_min=drift_min,
+                 risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
+                 risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
+                 risk_trade_max=risk_trade_max)
         return
 
     if mode == "dry":
@@ -980,7 +1131,10 @@ def main():
                  min_price=min_price, chase_match=chase_match, chase_max_mult=chase_max_mult,
                  summary_h=summary_h, daily_at_min=daily_at_min,
                  drift_edge=drift_edge, drift_margin=drift_margin,
-                 drift_max_price=drift_max_price, drift_min=drift_min)
+                 drift_max_price=drift_max_price, drift_min=drift_min,
+                 risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
+                 risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
+                 risk_trade_max=risk_trade_max)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -1010,7 +1164,10 @@ def main():
                  signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=min_price,
                  chase_match=chase_match, chase_max_mult=chase_max_mult, summary_h=summary_h, daily_at_min=daily_at_min,
                  drift_edge=drift_edge, drift_margin=drift_margin,
-                 drift_max_price=drift_max_price, drift_min=drift_min)
+                 drift_max_price=drift_max_price, drift_min=drift_min,
+                 risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
+                 risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
+                 risk_trade_max=risk_trade_max)
 
 
 if __name__ == "__main__":
