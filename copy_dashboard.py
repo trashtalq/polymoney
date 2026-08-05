@@ -1987,6 +1987,34 @@ def api_signals():
                               for r in exits[-100:]]})
 
 
+@app.route("/api/raw_signals")
+def api_raw_signals():
+    """СЫРАЯ лента сделок целей — БЕЗ единого фильтра (спорт, флипперы, микрокэфы — всё).
+    Книга копирует лишь ~7% сделок, остальное для бота невидимо; здесь отдаём всё, что цели
+    сделали, для контура «объём» (настройка быстрого копирования на большом потоке).
+    Параметры: since (unix), wallets=addr1,addr2 (пусто = все цели). Формат как /api/signals."""
+    if SIGNALS_TOKEN:
+        got = request.headers.get("X-Signals-Token", "") or request.args.get("token", "") or ""
+        if not hmac.compare_digest(got, SIGNALS_TOKEN):
+            return jsonify({"ok": False, "error": "signals token required"}), 401
+    since = int(request.args.get("since", 0) or 0)
+    wl = (request.args.get("wallets") or "").strip()
+    wset = {w.strip().lower() for w in wl.split(",") if w.strip()} if wl else None
+    rows = [r for r in list(ct.RAW_FEED)
+            if r.get("t", 0) > since and (not wset or r.get("w") in wset)]
+    sigs = [r for r in rows if r.get("side") == "BUY"]
+    exits = [r for r in rows if r.get("side") == "SELL"]
+    return jsonify({
+        "now": int(time.time()), "paused": False, "source": "raw", "buffer": len(ct.RAW_FEED),
+        "signals": [{"t": r["t"], "w": r["w"], "tok": r["tok"], "cid": r.get("cid", ""),
+                     "px": r.get("px"), "spend": round((r.get("px") or 0) * (r.get("sz") or 0), 2),
+                     "out": r.get("out", ""), "title": r.get("title", "")} for r in sigs[-400:]],
+        # frac неизвестен (холдинг цели не считаем) -> 1.0 = «вышла целиком». Для контура объёма ок.
+        "exits": [{"t": r["t"], "w": r["w"], "tok": r["tok"], "cid": r.get("cid", ""),
+                   "frac": 1.0, "out": r.get("out", ""), "title": r.get("title", "")}
+                  for r in exits[-400:]]})
+
+
 @app.route("/api/shadow_audit")
 def api_shadow_audit():
     """Аудит фильтров по теневому журналу: что каждый фильтр отсеивает и что это стоило бы.

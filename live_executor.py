@@ -584,7 +584,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
              chase_match=False, chase_max_mult=2.0, summary_h=24.0, daily_at_min=1410,
              drift_edge=0.22, drift_margin=0.03, drift_max_price=0.70, drift_min=0.02,
              risk_pct=True, risk_deploy=0.65, risk_trade=0.02, risk_day=0.15,
-             risk_wallet=0.10, risk_stop_dd=0.10, risk_trade_max=100.0, direct_src=None):
+             risk_wallet=0.10, risk_stop_dd=0.10, risk_trade_max=100.0, direct_src=None,
+             feed_path="/api/signals"):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -632,7 +633,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 feed_ws = params["wallets"].split(",")
                 r = direct_src.fetch(state["last_t"], feed_ws)
             else:
-                r = s.get(f"{server}/api/signals", params=params, timeout=25).json()
+                r = s.get(f"{server}{feed_path}", params=params, timeout=25).json()
         except Exception as ex:  # noqa: BLE001
             print(f"[{time.strftime('%H:%M:%S')}] сервер недоступен ({ex})", flush=True)
             time.sleep(poll)
@@ -1085,6 +1086,11 @@ def main():
     risk_trade_max = float(cfg.get("RISK_TRADE_MAX") or 100)  # потолок ставки в $ (ликвидность!)
     # ИСТОЧНИК СИГНАЛОВ: server (через наш сервер, задержка 45-90с) | direct (сами опрашиваем
     # data-api, задержка = интервал опроса). direct кратно быстрее -> меньше проскальзывания.
+    # SIGNAL_FEED=raw -> СЫРАЯ лента сервера (все сделки целей, без категорийных фильтров:
+    # спорт, флипперы, микрокэфы). Нужна контуру «объём»: книга копирует лишь ~7% сделок.
+    feed_path = "/api/raw_signals" if (cfg.get("SIGNAL_FEED") or "").strip().lower() == "raw"         else "/api/signals"
+    if feed_path.endswith("raw_signals"):
+        print("лента сигналов: СЫРАЯ (без фильтров категорий) — режим объёма", flush=True)
     direct_src = None
     if (cfg.get("SIGNAL_SOURCE") or "server").strip().lower() == "direct":
         try:
@@ -1138,7 +1144,7 @@ def main():
                  drift_max_price=drift_max_price, drift_min=drift_min,
                  risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
                  risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
-                 risk_trade_max=risk_trade_max, direct_src=direct_src)
+                 risk_trade_max=risk_trade_max, direct_src=direct_src, feed_path=feed_path)
         return
 
     if mode == "dry":
@@ -1151,7 +1157,7 @@ def main():
                  drift_max_price=drift_max_price, drift_min=drift_min,
                  risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
                  risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
-                 risk_trade_max=risk_trade_max, direct_src=direct_src)
+                 risk_trade_max=risk_trade_max, direct_src=direct_src, feed_path=feed_path)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -1184,7 +1190,7 @@ def main():
                  drift_max_price=drift_max_price, drift_min=drift_min,
                  risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
                  risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
-                 risk_trade_max=risk_trade_max, direct_src=direct_src)
+                 risk_trade_max=risk_trade_max, direct_src=direct_src, feed_path=feed_path)
 
 
 if __name__ == "__main__":

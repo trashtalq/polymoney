@@ -944,6 +944,24 @@ def settle_shadow(book: dict, resolved: dict) -> None:
         book["skipped_realized"] = book.get("skipped_realized", 0.0) + pnl
 
 
+# ── СЫРОЙ ПОТОК СДЕЛОК ЦЕЛЕЙ (без единого фильтра) ───────────────────────────────────────────
+# Зачем: книга копирует лишь ~7% сделок (категории, цена, кэш), и всё остальное для бота
+# невидимо. Для настройки быстрого копирования нужен ОБЪЁМ, поэтому пишем всё, что цели вообще
+# сделали — спорт, флипперы, микрокэфы. Данные уже загружены циклом, лишних запросов ноль.
+# Кольцевой буфер в памяти (не на диск): переживать рестарт ему незачем, это живая лента.
+from collections import deque as _deque
+RAW_FEED = _deque(maxlen=30000)
+
+
+def _raw_record(e, wallet):
+    try:
+        RAW_FEED.append({"t": ev_ts(e), "w": wallet, "tok": ev_token(e), "cid": ev_cid(e),
+                         "px": round(ev_price(e), 4), "sz": round(_f(e, "size"), 2),
+                         "side": classify(e), "out": ev_outcome(e), "title": ev_title(e)[:60]})
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _oracle(api: API, cid: str):
     """Резолв рынка с кэшами: позитив — навсегда (_RES_CACHE), негатив — с TTL (_RES_NEG),
     чтобы не переспрашивать CLOB про ещё не резолвнутые рынки каждый цикл."""
@@ -1010,6 +1028,7 @@ def cycle(api: API, book: dict, wallets: list, per_trade: float, slippage: float
         for e in new:
             if classify(e) in ("BUY", "SELL"):
                 need_px.add(ev_token(e))
+                _raw_record(e, wl)                   # СЫРОЙ поток: до категорийных фильтров
         todo.append((wl, new, resolved))
 
     # --- (B) цены одним махом: входы по ТЕКУЩЕЙ цене (честная плата за задержку) + живой P/L ---

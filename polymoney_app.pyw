@@ -53,6 +53,21 @@ CONTOURS = {
              "allow": "flow_allowlist.json", "state": "flow15k_state.json",
              "exec": "flow_exec_state.json", "hold": "hold_only_flow.json",
              "tag": "📈 ТЕСТ ПОТОКА (виртуальные)"},
+    # ОБЪЁМ: весь список сервера БЕЗ отсева (спорт, флипперы, микрокэфы — всё). Нужен, чтобы
+    # настраивать быстрое копирование на большом потоке (~180 сделок/мин против 2-5 в СУТКИ).
+    # Идёт по СЫРОЙ ленте (/api/raw_signals) мимо категорийных фильтров книги.
+    "all": {"tab": "  🌊 Всё (объём)  ",
+            "desc": "ВЕСЬ список сервера, без фильтров — максимум сделок для настройки скорости",
+            "allow": "all_allowlist.json", "state": "all15k_state.json",
+            "exec": "all_exec_state.json", "hold": "hold_only_all.json",
+            "tag": "🌊 ОБЪЁМ (виртуальные)",
+            "env": {"SIGNAL_FEED": "raw",            # сырая лента: ничего не режем
+                    "PAPER_MIN_PRICE": "0.01",       # микрокэфы НЕ режем
+                    "PAPER_MAX_PRICE": "0.99",       # фаворитов НЕ режем
+                    "PAPER_PER_TRADE": "5",          # мелкая ставка: сделок будет очень много
+                    "PAPER_MAX_PER_WALLET": "50",
+                    "PAPER_MAX_ENTRIES_PER_POS": "1",
+                    "PAPER_POLL_SEC": "10"}},        # чаще опрос — замеряем скорость реакции
 }
 SETTINGS = HERE / "app_settings.json"          # {server, pw} — локально, в gitignore
 BOT = HERE / "live_executor.py"
@@ -1036,6 +1051,7 @@ class App(tk.Tk):
         env["PAPER_STATE_FILE"] = c["state"]         # СВОЙ виртуальный счёт
         env["STATE_FILE"] = c["exec"]                # СВОЙ журнал исполненного
         env["HOLD_FILE"] = c["hold"]
+        env.update({k: str(v) for k, v in (c.get("env") or {}).items()})   # спец-настройки контура
         if str(read_env().get("TG_PAPER") or "0").strip() not in ("1", "true", "yes", "on"):
             env["TG_ENABLED"] = "0"                  # в публичный канал пишет только реальный бот
         else:
