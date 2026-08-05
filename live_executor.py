@@ -96,6 +96,12 @@ def load_env():
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 cfg[k.strip()] = v.strip().strip('"').strip("'")
+    # ПЕРЕОПРЕДЕЛЕНИЕ ИЗ ОКРУЖЕНИЯ. Раньше был только жёсткий белый список, и PAPER_*/RISK_* в него
+    # не входили -> env-настройки контуров (пульт, CONTOURS[...]["env"]) МОЛЧА игнорировались:
+    # контур «объём» стартовал с ценой 0.12-0.92 вместо 0.01-0.99 и чужой ставкой. Теперь любой
+    # ключ с известным префиксом тоже подхватывается.
+    _PREFIX = ("PAPER_", "RISK_", "TG_", "DRIFT_", "CHASE_", "SIGNAL_")
+    cfg.update({k: v for k, v in os.environ.items() if k.startswith(_PREFIX)})
     cfg.update({k: v for k, v in os.environ.items() if k in (
         "MODE", "PRIVATE_KEY", "SERVER", "DEPOSIT", "PER_TRADE_USD",
         "DAILY_MAX_USD", "MAX_PRICE", "POLL_SEC", "GROUP", "FUNDER", "MAX_AGE_SEC",
