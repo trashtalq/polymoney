@@ -29,6 +29,8 @@ import re
 import time
 from pathlib import Path
 
+from concurrent.futures import ThreadPoolExecutor
+
 import requests
 
 DATA_API = "https://data-api.polymarket.com"
@@ -422,6 +424,7 @@ SHADOW_NOTIONAL = 1.0    # $ на каждый теневой вход (един
 # а задержка — главный кост копира. Скан делаем редко (стаггером); цены каждый цикл берём
 # ОДНИМ батчем midpoints; резолвы добирает независимый оракул CLOB (+ негативный кэш). ---
 POS_EVERY = 10                  # полный скан позиций каждого кошелька раз в N циклов
+ACT_WORKERS = 12                # параллельных запросов активности за цикл (скорость захвата)
 SHADOW_RESOLVE_PER_CYCLE = 30   # столько старых теневых записей добираем оракулом за цикл
 
 # --- РЕАЛ-ЛЕДЖЕР: параллельный учёт «а хватило бы НАСТОЯЩЕГО кэша?» -------------------
@@ -992,6 +995,25 @@ def cycle(api: API, book: dict, wallets: list, per_trade: float, slippage: float
     ncyc = book["cycle_n"] = book.get("cycle_n", 0) + 1
 
     # --- (A) лёгкий сбор ---
+    # ПАРАЛЛЕЛЬНЫЙ сбор активности (фикс 2026-08-05): раньше 281 кошелёк опрашивался
+    # ПОСЛЕДОВАТЕЛЬНО -> цикл занимал ~2 минуты, и это время целиком было задержкой копирования
+    # (замер: медиана захвата сигнала 15с, p90 34с, худшие случаи — под минуту). Теперь активность
+    # тянется пулом потоков: цикл ужимается до времени самых медленных запросов.
+    # Скан ПОЗИЦИЙ оставлен последовательным — он и так стаггерится (1/POS_EVERY за цикл).
+    _wl_all = [w.lower() for w in wallets]
+
+    def _act(w):
+        try:
+            return api.activity(w, limit=500)
+        except Exception as ex:                      # noqa: BLE001
+            print(f"{w[:10]}…: activity недоступна ({ex})")
+            return None                              # None = сбой (seen НЕ двигаем)
+
+    _acts: dict = {}
+    if _wl_all:
+        with ThreadPoolExecutor(max_workers=min(ACT_WORKERS, len(_wl_all))) as _pool:
+            _acts = dict(zip(_wl_all, _pool.map(_act, _wl_all)))
+
     todo = []                                        # (wl, новые события, резолвы из скана позиций)
     need_px: set = set()
     for i, w in enumerate(wallets):
@@ -1011,11 +1033,9 @@ def cycle(api: API, book: dict, wallets: list, per_trade: float, slippage: float
                 marks[tok] = cp
                 if cp <= 0.01 or cp >= 0.99 or p.get("redeemable"):
                     resolved[tok] = 1.0 if cp >= 0.5 else 0.0
-        try:
-            evs = api.activity(wl, limit=500)
-        except Exception as ex:                      # noqa: BLE001
-            print(f"{wl[:10]}…: activity недоступна ({ex})")
-            todo.append((wl, [], resolved))          # seen НЕ двигаем — доберём в следующий цикл
+        evs = _acts.get(wl)
+        if evs is None:                              # запрос упал -> seen НЕ двигаем, доберём позже
+            todo.append((wl, [], resolved))
             continue
         last = book["seen"].get(wl, 0)
         if last == 0:
