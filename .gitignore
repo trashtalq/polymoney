@@ -99,3 +99,9 @@ all15k_state.json
 all_exec_state.json
 hold_only_all.json
 _ab_result_flow.txt
+volA_*.json
+volB_*.json
+sim_state.json
+sim_exec_state.json
+hold_only_sim.json
+hold_only_vol*.json

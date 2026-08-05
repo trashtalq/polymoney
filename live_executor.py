@@ -603,6 +603,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
     session_add = {}          # tok -> $ добавлено ЭТИМ процессом (страхует settle-лаг чейна)
     held = {}                 # tok -> $ реально вложено с кошелька (обновляется каждый цикл)
     smoke_done = False
+    lat_samples = []          # задержки захвата сигналов, сек (замер скорости)
     primed = False                                    # форвард на КАЖДОМ запуске, не только первом
     cap_usd = max_entries * per_trade                 # потолок $ на одну позу (напр. 2×$1=$2)
 
@@ -686,6 +687,23 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             state["day_pnl"] = 0.0                   # заработок за день (по закрытым сделкам)
             state["day_buys"] = 0
             state["day_sells"] = 0
+
+        # ── ЗАМЕР ЗАХВАТА: сколько секунд прошло от сделки цели до момента, когда мы её увидели.
+        # Это главный показатель копи-бота: чем он больше, тем хуже цена, по которой мы входим.
+        _seen_at = time.time()
+        for _s in r.get("signals", []):
+            if sig_key(_s) not in state["done"] and _s.get("t"):
+                lat_samples.append(round(_seen_at - _s["t"], 1))
+        if len(lat_samples) > 3000:
+            del lat_samples[:1000]
+        if lat_samples and time.time() - state.get("lat_print_t", 0) > 60:
+            state["lat_print_t"] = time.time()
+            q = sorted(lat_samples)
+            med = q[len(q) // 2]
+            p90 = q[int(len(q) * 0.9)]
+            state["lat_med"], state["lat_p90"], state["lat_n"] = med, p90, len(q)
+            print(f"  [ЗАХВАТ] сигналов {len(q)} | медиана {med:.0f}с | p90 {p90:.0f}с | "
+                  f"мин {q[0]:.0f}с | макс {q[-1]:.0f}с", flush=True)
 
         allow = load_allowlist()                      # белый список кошельков (перечитывается на лету)
         # ── РИСК-ДВИЖОК (только реал): лимиты как % от КАПИТАЛА + стоп по дневной просадке ──
