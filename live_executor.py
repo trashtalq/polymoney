@@ -822,13 +822,20 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             chase_mid = cur_mid if chase_match else None
             if chase_match and chase_mid and px > 0 and chase_mid > px:
                 stake = round(per_trade * min(chase_max_mult, chase_mid / px), 2)
-            # лимит на позу по РЕАЛЬНОМУ вложению (чейн + входы этого цикла) — не больше cap_usd
+            # ЛИМИТ НА ПОЗУ = сколько денег максимум держим в одном токене (cap_usd).
+            # Раньше при нехватке места вход ОТВЕРГАЛСЯ целиком, и любая ПЫЛЬ в позиции
+            # (0.004 от частичного филла — на экране «$0.00») запирала токен навсегда:
+            # 0.004 + 5 > 5. Теперь добираем до лимита: если места мало — уменьшаем ставку,
+            # и только если места почти нет — пропускаем.
             deployed = held.get(sig["tok"], {}).get("usd", 0.0) + session_add.get(sig["tok"], 0.0)
-            if deployed + stake > cap_usd + 1e-6:
-                print(f"  skip (в этой позе уже ~${deployed:.2f}, лимит ${cap_usd:.2f}): {title}",
+            room = cap_usd - deployed
+            if room < min(1.0, stake * 0.2):          # места нет -> позиция и правда набрана
+                print(f"  skip (в этой позе уже ${deployed:.2f} из лимита ${cap_usd:.2f}): {title}",
                       flush=True)
                 state["done"].append(k)
                 continue
+            if stake > room:                          # места меньше ставки -> входим на остаток
+                stake = round(room, 2)
             # ЛИМИТ НА КОШЕЛЁК = сумма его ТЕКУЩИХ открытых позиций (не расход за сутки). Частильщик
             # входит снова, ТОЛЬКО когда его прошлые позиции закрылись (в плюс/минус — неважно, held
             # упал). При funder считаем по реальной экспозиции; без funder (dry) — старый дневной счётчик.
