@@ -35,14 +35,15 @@ HERE = Path(__file__).resolve().parent
 ENV = HERE / "polymarket.env"
 ENV_EXAMPLE = HERE / "polymarket.env.example"
 STATE = HERE / "live_exec_state.json"
-PAPER = HERE / "paper15k_state.json"           # состояние теневого бота (equity/pnl/pos)
+PAPER = HERE / "sim_state.json"                # состояние теста $1000 (его и показываем
+                                               # во вкладке «Позиции»: цены входа/выхода)
 UPTIME_FILE = HERE / "paper_uptime.json"       # накопленное время работы теневого (переживает рестарты)
 HOLD_FILE = HERE / "hold_only.json"            # реал: режим «держим» (стоп входов, выходы работают)
 HOLD_FILE_PAPER = HERE / "hold_only_paper.json"   # теневой: то же
 # ── контур «Лучшие»: свой allowlist + своё состояние (тестируем отобранных изолированно) ──
 # Какие вкладки показывать. Только «Реал» — пульт под боевой счёт. Вернуть исследовательские:
 # SHOW_TABS = {"paper", "best", "flow", "all", "positions"}
-SHOW_TABS = set()
+SHOW_TABS = {"sim", "positions"}
 
 BEST_ALLOW = HERE / "best_allowlist.json"
 BEST_STATE = HERE / "best15k_state.json"
@@ -60,6 +61,18 @@ CONTOURS = {
     # ОБЪЁМ: весь список сервера БЕЗ отсева (спорт, флипперы, микрокэфы — всё). Нужен, чтобы
     # настраивать быстрое копирование на большом потоке (~180 сделок/мин против 2-5 в СУТКИ).
     # Идёт по СЫРОЙ ленте (/api/raw_signals) мимо категорийных фильтров книги.
+    # ТЕСТ НА ВИРТУАЛЬНУЮ ТЫСЯЧУ: тот же состав, что у боевого счёта (copy_allowlist.json),
+    # те же цены/задержки/лимиты — но деньги виртуальные. Вкладка «Реал» показывает НАСТОЯЩИЙ
+    # счёт Polymarket (там пусто), поэтому виртуальный банк живёт здесь.
+    "sim": {"tab": "  💵 Тест $1000  ",
+            "desc": "боевой состав и реальные цены, виртуальный банк $1000",
+            "allow": "copy_allowlist.json", "state": "sim_state.json",
+            "exec": "sim_exec_state.json", "hold": "hold_only_sim.json",
+            "tag": "💵 ТЕСТ $1000 (виртуальные)",
+            "env": {"PAPER_BANKROLL": "1000", "PAPER_PER_TRADE": "5",
+                    "PAPER_MAX_PER_WALLET": "100", "PAPER_MIN_PRICE": "0.12",
+                    "PAPER_MAX_PRICE": "0.92", "PAPER_MAX_ENTRIES_PER_POS": "1",
+                    "PAPER_EXIT_MIN_FRAC": "0.1", "PAPER_POLL_SEC": "5"}},
     "all": {"tab": "  🌊 Всё (объём)  ",
             "desc": "ВЕСЬ список сервера, без фильтров — максимум сделок для настройки скорости",
             "allow": "all_allowlist.json", "state": "all15k_state.json",
@@ -591,7 +604,7 @@ class App(tk.Tk):
         root.rowconfigure(1, weight=1)
         top = ttk.Frame(root, style="Card.TFrame", padding=10)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Label(top, text="Позиции теневого — НАШИ цены входа/выхода (сверяй с Polymarket)",
+        ttk.Label(top, text="Позиции теста — НАШИ цены входа/выхода (сверяй с Polymarket)",
                   style="Card.TLabel").pack(side="left")
         self.posdelay_lbl = ttk.Label(top, text="", style="Money.TLabel")
         self.posdelay_lbl.pack(side="left", padx=(16, 0))
