@@ -266,13 +266,16 @@ def st_save(s):
     # его порча означала бы ПОВТОРНЫЕ покупки уже отработанных сигналов.
     # На Windows os.replace может кратко падать PermissionError (файл открыт антивирусом/
     # индексатором/пультом) — ретраим, и НЕ роняем бота из-за проблемы с записью лога.
-    tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+    # Временный файл УНИКАЛЕН НА ПРОЦЕСС (pid). Раньше имя было общим, и два экземпляра бота
+    # (например, старый не успел умереть при перезапуске) дрались за один .tmp: первый делал
+    # os.replace, второй получал WinError 2 «не удаётся найти указанный файл».
+    tmp = STATE_FILE.with_name(f"{STATE_FILE.name}.{os.getpid()}.tmp")
     for attempt in range(5):
         try:
             tmp.write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
             os.replace(tmp, STATE_FILE)
             return
-        except PermissionError:
+        except (PermissionError, FileNotFoundError):
             time.sleep(0.3 * (attempt + 1))
         except Exception as ex:  # noqa: BLE001
             print(f"  !! не удалось сохранить состояние ({ex}) — продолжаю", flush=True)

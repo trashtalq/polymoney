@@ -1106,6 +1106,8 @@ class App(tk.Tk):
     def start_contour(self, key):
         if not BOT.exists():
             return
+        if self.cproc.get(key):                      # уже запущен -> второй экземпляр не плодим:
+            return                                   # два процесса на один файл состояния конфликтуют
         if not self._c_load(key):
             messagebox.showwarning("Пустой состав", "Добавь хотя бы один кошелёк в состав теста.")
             return
