@@ -1955,6 +1955,11 @@ def api_signals():
         if not hmac.compare_digest(got, SIGNALS_TOKEN):
             return jsonify({"ok": False, "error": "signals token required"}), 401
     since = int(request.args.get("since", 0) or 0)
+    # РАЗДЕЛЬНЫЕ КУРСОРЫ (фикс 2026-08-06): раньше бот вёл ОДИН water-mark на оба потока, и
+    # поток выходов сдвигал его за непрочитанные входы -> входы терялись молча.
+    since_buy = int(request.args.get("since_buy", since) or since)
+    since_exit = int(request.args.get("since_exit", since) or since)
+    limit = max(1, min(2000, int(request.args.get("limit", 400) or 400)))
     wl_param = (request.args.get("wallets") or "").strip()
     if wl_param:                                       # лента по явному списку кошельков (из main)
         wset = {w.strip().lower() for w in wl_param.split(",") if w.strip()}
@@ -1971,20 +1976,27 @@ def api_signals():
         # реальные BUY/SELL за узкое окно [-4000:] -> бот переставал получать входы И выходы.
         recent = book.get("log", [])[-60000:]
     sigs = [r for r in recent                          # фильтруем ВНЕ лока (не блокируем poll_loop)
-            if r.get("act") == "BUY" and r.get("t", 0) > since and r.get("tok") and filt(r)]
+            if r.get("act") == "BUY" and r.get("t", 0) > since_buy and r.get("tok") and filt(r)]
     # ВЫХОДЫ: цель продала (не резолв) -> мирроим выход. frac = какую долю холдинга продала.
     exits = [r for r in recent
-             if r.get("act") == "SELL" and r.get("t", 0) > since and r.get("tok") and filt(r)]
-    return jsonify({"now": int(time.time()), "paused": paused,
+             if r.get("act") == "SELL" and r.get("t", 0) > since_exit and r.get("tok") and filt(r)]
+    # СТАРЕЙШИЕ первыми: раньше отдавались ПОСЛЕДНИЕ N, и при всплеске середина очереди
+    # выпадала навсегда (курсор бота прыгал за неё). Теперь очередь вычерпывается по порядку,
+    # а truncated говорит боту «не спи, забери остаток сразу».
+    sigs.sort(key=lambda r: r.get("t", 0))
+    exits.sort(key=lambda r: r.get("t", 0))
+    trunc = len(sigs) > limit or len(exits) > limit
+    sigs, exits = sigs[:limit], exits[:limit]
+    return jsonify({"now": int(time.time()), "paused": paused, "truncated": trunc,
                     "last_poll": status.get("last_poll", 0),
                     "signals": [{"t": r["t"], "w": r.get("w", ""), "tok": r["tok"],
                                  "cid": r.get("cid", ""), "px": r.get("px"),
                                  "spend": r.get("spend"), "out": r.get("out", ""),
-                                 "title": r.get("title", "")} for r in sigs[-100:]],
+                                 "title": r.get("title", "")} for r in sigs],
                     "exits": [{"t": r["t"], "w": r.get("w", ""), "tok": r["tok"],
                                "cid": r.get("cid", ""), "frac": r.get("frac", 1.0),
                                "out": r.get("out", ""), "title": r.get("title", "")}
-                              for r in exits[-100:]]})
+                              for r in exits]})
 
 
 @app.route("/api/raw_signals")

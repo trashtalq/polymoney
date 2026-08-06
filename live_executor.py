@@ -631,7 +631,11 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
     while True:
         try:
             allow = load_allowlist()                   # копи-набор = локальный allowlist (источник правды)
-            params = {"since": state["last_t"]}
+            # РАЗДЕЛЬНЫЕ КУРСОРЫ: общий water-mark приводил к тихой потере входов — поток
+            # выходов сдвигал его за непрочитанные покупки. since оставлен для старого сервера.
+            _bt = int(state.get("last_buy_t") or state.get("last_t") or 0)
+            _et = int(state.get("last_exit_t") or state.get("last_t") or 0)
+            params = {"since": min(_bt, _et), "since_buy": _bt, "since_exit": _et, "limit": 400}
             if allow:
                 # Лента по нашим кошелькам ПЛЮС те, чьи позиции мы ЕЩЁ ДЕРЖИМ. Иначе, убрав кошелёк
                 # из состава, мы перестали бы получать его ВЫХОДЫ и уже открытые позиции зависли бы
@@ -645,7 +649,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 # ПРЯМОЙ ИСТОЧНИК: опрашиваем data-api сами -> латентность = интервал опроса
                 # (5-15с) вместо 45-90с через наш сервер. Формат ответа идентичен.
                 feed_ws = params["wallets"].split(",")
-                r = direct_src.fetch(state["last_t"], feed_ws)
+                r = direct_src.fetch(min(_bt, _et), feed_ws)
             else:
                 r = s.get(f"{server}{feed_path}", params=params, timeout=25).json()
         except Exception as ex:  # noqa: BLE001
@@ -668,7 +672,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
         # что случилось, пока он был выключен, по уже уехавшим ценам.
         if not primed:
             primed = True
-            state["last_t"] = max(state["last_t"], srv_now)
+            state["last_t"] = max(state.get("last_t", 0), srv_now)
+            state["last_buy_t"] = state["last_exit_t"] = state["last_t"]
             st_save(state)
             print(f"[{time.strftime('%H:%M:%S')}] старт: форвард с этой точки, "
                   f"бэклог ({len(r.get('signals', []))} сигналов) пропущен. Жду новые сделки ядра…",
@@ -753,7 +758,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                   f"выходы за целью работают", flush=True)
         for sig in r.get("signals", []):
             k = sig_key(sig)
-            state["last_t"] = max(state["last_t"], sig["t"])
+            state["last_buy_t"] = max(int(state.get("last_buy_t") or 0), sig["t"])
             if holding:                                # держим: НОВЫЕ входы не берём (не отыгрываем позже)
                 state["done"].append(k)
                 continue
@@ -949,7 +954,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
         # --- ВЫХОДЫ: цель ПРОДАЛА (до резолва) -> продаём свою позицию ЦЕЛИКОМ. Мелкие скейл-ауты
         # (доля < exit_min_frac) игнорим; smoke выходы не трогает (он про проверку входа). ---
         for ex in r.get("exits", []):
-            state["last_t"] = max(state["last_t"], ex.get("t", 0))
+            state["last_exit_t"] = max(int(state.get("last_exit_t") or 0), ex.get("t", 0))
             xk = "X|" + str(ex.get("t", 0)) + "|" + ex.get("tok", "")
             if xk in state["done"]:
                 continue
@@ -1160,7 +1165,18 @@ def main():
         p_chase = bool(int(pf("PAPER_CHASE_MATCH", 0)))
         p_chase_mult = pf("PAPER_CHASE_MAX_MULT", 2.0)
         pstate = pst_load(bankroll)
-        pstate["bankroll"] = bankroll                # если поменяли банк в env — подхватываем
+        # СТАРТОВЫЙ БАНК — база для PnL/ROI, и менять его на живом состоянии НЕЛЬЗЯ: кэш и позиции
+        # останутся от прежнего прогона, а PnL посчитается от новой базы. Реальный случай: контур
+        # работал со стартом $15000, в env поставили 200 -> показало PnL +14791 и ROI +7395%.
+        _old_bank = float(pstate.get("bankroll") or 0)
+        _traded = int(pstate.get("buys", 0)) + int(pstate.get("sells", 0)) > 0
+        if _traded and abs(_old_bank - bankroll) > 1e-6:
+            print(f"!! PAPER_BANKROLL={bankroll:g}, но контур уже торговал со стартом "
+                  f"{_old_bank:g} — оставляю {_old_bank:g}, иначе PnL/ROI станут враньём.\n"
+                  f"   Нужен новый банк -> удали {PAPER_FILE.name} (обнулит статистику контура).",
+                  flush=True)
+            bankroll = _old_bank
+        pstate["bankroll"] = bankroll
         api = ct.API()
         pclient = PaperClient(pstate, api, slip=float(cfg.get("PAPER_SLIP") or 0.01))
         print(f"=== ТЕНЕВОЙ (PAPER) | банк ${bankroll:,.0f} | ставка ${p_trade:g} | на кошелёк ${p_wallet:g} "
