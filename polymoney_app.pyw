@@ -40,6 +40,10 @@ UPTIME_FILE = HERE / "paper_uptime.json"       # накопленное врем
 HOLD_FILE = HERE / "hold_only.json"            # реал: режим «держим» (стоп входов, выходы работают)
 HOLD_FILE_PAPER = HERE / "hold_only_paper.json"   # теневой: то же
 # ── контур «Лучшие»: свой allowlist + своё состояние (тестируем отобранных изолированно) ──
+# Какие вкладки показывать. Только «Реал» — пульт под боевой счёт. Вернуть исследовательские:
+# SHOW_TABS = {"paper", "best", "flow", "all", "positions"}
+SHOW_TABS = set()
+
 BEST_ALLOW = HERE / "best_allowlist.json"
 BEST_STATE = HERE / "best15k_state.json"
 BEST_EXEC_STATE = HERE / "best_exec_state.json"
@@ -202,6 +206,9 @@ class App(tk.Tk):
         self.paper_uptime = self._load_uptime()   # накопленное время работы за всё время (сек)
         self._uptime_save_t = 0
         self._wd_fired = False     # сторож: алерт уже отправлен (не спамим)
+        # поля настроек теневого нужны, даже когда его вкладка скрыта (их читает
+        # save_paper_limits при запуске контуров) — создаём заранее, а не в _build_contour
+        self.pfields = {k: tk.StringVar(value=d) for k, _l, d in PAPER_LIMITS}
         self.q = queue.Queue()
         self.wallet_rows = {}      # iid -> {"addr":..., "paused":bool}
         self._client = None        # SDK-клиент для баланса (создаётся лениво по ключу, локально)
@@ -301,20 +308,25 @@ class App(tk.Tk):
         ttk.Label(outer, text="◉ POLYMONEY", style="Title.TLabel").pack(anchor="w", pady=(0, 6))
         self.nb = ttk.Notebook(outer)
         self.nb.pack(fill="both", expand=True)
+        # ВКЛАДКИ: оставлен только «Реал» (решение пользователя 2026-08-06 — пульт под боевой
+        # счёт, без исследовательских контуров). Код теневого/контуров/позиций НЕ удалён:
+        # чтобы вернуть, добавь имена в SHOW_TABS.
         real = ttk.Frame(self.nb, padding=10)
-        paper = ttk.Frame(self.nb, padding=10)
-        positions = ttk.Frame(self.nb, padding=10)
-        ctabs = {k: ttk.Frame(self.nb, padding=10) for k in CONTOURS}
         self.nb.add(real, text="  💰 Реал  ")
-        self.nb.add(paper, text="  🌗 Теневой $15k  ")
-        for k, c in CONTOURS.items():
-            self.nb.add(ctabs[k], text=c["tab"])
-        self.nb.add(positions, text="  📋 Позиции теневого  ")
-        for k in CONTOURS:
-            self._build_contour(ctabs[k], k)
         self._build_real(real)
-        self._build_paper(paper)
-        self._build_positions(positions)
+        if "paper" in SHOW_TABS:
+            paper = ttk.Frame(self.nb, padding=10)
+            self.nb.add(paper, text="  🌗 Теневой $15k  ")
+            self._build_paper(paper)
+        for k, c in CONTOURS.items():
+            if k in SHOW_TABS:
+                fr = ttk.Frame(self.nb, padding=10)
+                self.nb.add(fr, text=c["tab"])
+                self._build_contour(fr, k)
+        if "positions" in SHOW_TABS:
+            positions = ttk.Frame(self.nb, padding=10)
+            self.nb.add(positions, text="  📋 Позиции  ")
+            self._build_positions(positions)
 
     def _build_real(self, root):
         root.columnconfigure(0, weight=1, uniform="c")
@@ -453,7 +465,6 @@ class App(tk.Tk):
 
     # ── вкладка «Теневой $15k»: тот же бот на виртуальный банк, реальные кэфы ──
     def _build_paper(self, root):
-        self.pfields = {key: tk.StringVar(value=default) for key, _l, default in PAPER_LIMITS}
         root.columnconfigure(0, weight=1)
         root.rowconfigure(2, weight=1)
         bar = ttk.Frame(root, style="Card.TFrame", padding=12)
@@ -606,6 +617,8 @@ class App(tk.Tk):
         self.postree.tag_configure("lose", foreground=RED)
 
     def refresh_positions(self):
+        if not hasattr(self, 'postree'):
+            return
         try:
             p = json.loads(PAPER.read_text(encoding="utf-8")) if PAPER.exists() else {}
         except Exception:  # noqa: BLE001
@@ -829,6 +842,8 @@ class App(tk.Tk):
             pass
 
     def _tick_paper_timer(self):
+        if not hasattr(self, 'puptime_lbl'):
+            self.after(1000, self._tick_paper_timer); return
         live = (time.time() - self.paper_started) if self.paper_started else 0
         total = self.paper_uptime + live             # накопленное + текущая сессия
         self.puptime_lbl.config(text=f"⏱ {self._fmt_dur(total)}")
@@ -911,8 +926,10 @@ class App(tk.Tk):
             return False
 
     def _paint_hold(self, paper):
+        btn = getattr(self, "phold_btn" if paper else "hold_btn", None)
+        if btn is None:
+            return
         holding = self._read_hold(paper)
-        btn = self.phold_btn if paper else self.hold_btn
         btn.config(text=("▶ Возобновить входы" if holding else "⏸ Стоп входов (держим)"),
                    style="Stop.TButton" if holding else "Small.TButton")
 
@@ -966,8 +983,8 @@ class App(tk.Tk):
                                         "процесс завершился сам — торговля прекращена")
                         self.stop_bot()
                 else:
-                    _w = self.plog if src == "paper" else (
-                        self.cw[src]["log"] if src in CONTOURS else None)
+                    _w = getattr(self, "plog", None) if src == "paper" else (
+                        (self.cw.get(src) or {}).get("log"))
                     self._log(line, _w)
         except queue.Empty:
             pass
@@ -1154,7 +1171,7 @@ class App(tk.Tk):
 
     def _refresh_paper_stats(self):
         try:
-            if PAPER.exists():
+            if PAPER.exists() and hasattr(self, 'pcards'):
                 p = json.loads(PAPER.read_text(encoding="utf-8"))
                 self.pcards["equity"].config(text=f"{p.get('equity', p.get('bankroll', 0)):,.0f}")
                 self.pcards["pnl"].config(text=f"{p.get('pnl', 0):+,.0f}")
