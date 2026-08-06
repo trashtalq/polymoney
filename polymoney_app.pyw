@@ -201,6 +201,7 @@ class App(tk.Tk):
         self.paper_started = None   # старт ТЕКУЩЕЙ сессии теневого (None = стоит)
         self.paper_uptime = self._load_uptime()   # накопленное время работы за всё время (сек)
         self._uptime_save_t = 0
+        self._wd_fired = False     # сторож: алерт уже отправлен (не спамим)
         self.q = queue.Queue()
         self.wallet_rows = {}      # iid -> {"addr":..., "paused":bool}
         self._client = None        # SDK-клиент для баланса (создаётся лениво по ключу, локально)
@@ -220,6 +221,7 @@ class App(tk.Tk):
         self.after(900, self._refresh_paper_stats)
         self.after(950, self._refresh_contour_stats)
         self.after(1000, self._tick_paper_timer)
+        self.after(30000, self._watchdog)   # сторож живости реального бота
         self._paint_hold(False)                     # начальное состояние кнопок «держим»
         self._paint_hold(True)
         self.after(1100, self._poll_positions)
@@ -835,6 +837,39 @@ class App(tk.Tk):
             self._uptime_save_t = time.time()
         self.after(1000, self._tick_paper_timer)
 
+    # ── СТОРОЖ (deadman): бот может умереть молча — следим и кричим ──
+    def _tg_notify(self, text):
+        """Алерт в тот же канал, что и торговые уведомления. Тихо игнорирует сбои."""
+        cfg = read_env()
+        tok, chat = (cfg.get("TG_TOKEN") or "").strip(), (cfg.get("TG_CHAT") or "").strip()
+        if not (tok and chat) or requests is None:
+            return False
+        try:
+            requests.post(f"https://api.telegram.org/bot{tok}/sendMessage",
+                          json={"chat_id": chat, "text": text, "parse_mode": "HTML"}, timeout=12)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _watchdog(self):
+        """Раз в 30с сверяем heartbeat реального бота. Молчаливая смерть — главный риск:
+        бот уже падал (PermissionError), и это заметили только через часы простоя."""
+        try:
+            if self.proc and STATE.exists():
+                hb = json.loads(STATE.read_text(encoding="utf-8")).get("hb", 0)
+                age = int(time.time()) - int(hb or 0)
+                if hb and age > 600:                       # 10 минут без цикла = что-то не так
+                    if not self._wd_fired:
+                        self._wd_fired = True
+                        msg = f"🚨 <b>БОТ НЕ ТОРГУЕТ</b>\nпоследний цикл {age // 60} мин назад"
+                        self._log_raw(f"🚨 СТОРОЖ: нет цикла {age // 60} мин — проверь бота", "red")
+                        self._tg_notify(msg)
+                elif hb and age < 120:
+                    self._wd_fired = False                 # ожил -> сторож снова готов
+        except Exception:  # noqa: BLE001
+            pass
+        self.after(30000, self._watchdog)
+
     # ── проверка Telegram-канала (до включения в бою) ──
     def tg_test(self):
         cfg = read_env()
@@ -926,7 +961,9 @@ class App(tk.Tk):
                         self._log_raw("⚠ Тест завершился.", "amber", self.cw[src]["log"])
                         self.stop_contour(src)
                     elif src == "real" and self.proc:
-                        self._log_raw("⚠ Бот завершился.", "amber")
+                        self._log_raw("⚠ Бот завершился САМ (не по кнопке).", "red")
+                        self._tg_notify("🚨 <b>БОТ ОСТАНОВИЛСЯ</b>\n"
+                                        "процесс завершился сам — торговля прекращена")
                         self.stop_bot()
                 else:
                     _w = self.plog if src == "paper" else (

@@ -598,6 +598,13 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
         s.headers["X-Signals-Token"] = signals_token
     seed_allowlist(s, server, group)                  # белый список из текущего ядра, если ещё нет
     state = st_load()
+    # ПРОСТОЙ: если между heartbeat'ами дыра — бот не торговал. Сообщаем, иначе смерть остаётся
+    # незамеченной (реальный случай: упал на PermissionError, узнали случайно через часы).
+    _gap = int(time.time()) - int(state.get("hb", 0) or 0)
+    if state.get("hb") and _gap > 300:
+        _h, _m = _gap // 3600, (_gap % 3600) // 60
+        print(f"!! ПРОСТОЙ: бот не работал {_h}ч {_m}м — эти сигналы пропущены", flush=True)
+        tg_send(f"⚠️ <b>БОТ ВОЗОБНОВИЛ РАБОТУ</b>\nпростой: {_h}ч {_m}м — сигналы за это время пропущены")
     state.setdefault("spent_by_wallet", {})           # адрес цели -> $ потрачено за день (fallback для dry)
     state.setdefault("tok_wallet", {})                # токен -> кошелёк-источник (для лимита экспозиции)
     session_add = {}          # tok -> $ добавлено ЭТИМ процессом (страхует settle-лаг чейна)
