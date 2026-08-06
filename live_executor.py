@@ -811,7 +811,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             # MIN_PRICE/MAX_PRICE). Иначе бот отказывался от выгодных входов «цена улетела 0.845
             # -> 0.835», хотя цена СНИЗИЛАСЬ.
             allowed = max_price
-            if cur_mid and cur_mid > px + drift_min:       # цена убежала ЗАМЕТНО (не тик шума)
+            drifted = bool(cur_mid and cur_mid > px + drift_min)
+            if drifted:                                   # цена убежала ЗАМЕТНО (не тик шума)
                 allowed = min(max_price, drift_max_price, (px + drift_edge) / (1 + drift_margin))
                 if cur_mid > allowed + 1e-9:
                     ev = (px + drift_edge) / cur_mid - 1
@@ -890,13 +891,31 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             # не проходит — так терялось ~2/3 сигналов). 2-значная цена конформна и тику 0.001.
             # Потолок FAK = EV-порог (округляем ВВЕРХ до цента: рынки с шагом 0.01 требуют 2 знака).
             # Так ордер нальётся на уехавшей цене, но НЕ дороже, чем математически выгодно.
-            cap = min(max_price, math.ceil(min(allowed, entry_px + 0.02) * 100 - 1e-9) / 100) \
-                if not chase_match else min(max_price, math.ceil(allowed * 100 - 1e-9) / 100)
+            # ПОТОЛОК ОРДЕРА. Раньше при догоне он равнялся `allowed`, а `allowed` остаётся
+            # MAX_PRICE (0.92), когда midpoint недоступен ИЛИ цена не выросла заметно — то есть
+            # потолок ФАКТИЧЕСКИ ИСЧЕЗАЛ, и бот наливался по любой цене до 0.92. Так набежала
+            # переплата $11.56 на 27 сделках (цель 0.49 -> филл 0.84, цель 0.25 -> 0.407).
+            # Теперь потолок ВСЕГДА привязан к цене цели: сколько мы готовы отдать сверх неё
+            # определяет EV (px + drift_edge), а не наличие мидпоинта.
+            ev_cap = (px + drift_edge) / (1 + drift_margin)          # выше — покупка EV-отрицательна
+            cap_raw = min(max_price, ev_cap)
+            if drifted:                              # цена убежала вверх -> ещё и жёсткий потолок
+                cap_raw = min(cap_raw, drift_max_price)
+            elif not chase_match:                    # цена на месте -> платим около цены цели
+                cap_raw = min(cap_raw, entry_px + 0.02)
+            cap = math.ceil(cap_raw * 100 - 1e-9) / 100
             try:
                 resp = client.place_market_order(
                     token_id=sig["tok"], side="BUY", amount=float(stake),
                     order_type="FAK", max_price=cap)
                 ok = resp_ok(resp)
+                if ok and paper:                     # ДИАГНОСТИКА переплаты: видно каждое звено
+                    _pr = pstate["pos"].get(sig["tok"], {})
+                    _fill = (_pr.get("cost", 0) / _pr["shares"]) if _pr.get("shares") else 0
+                    if _fill > px * 1.15:            # заплатили заметно дороже цели — печатаем почему
+                        print(f"  [ДИАГ] цель {px:.3f} | мид {cur_mid if cur_mid else '—'} | "
+                              f"порог EV {allowed:.3f} | потолок ордера {cap:.2f} | ФИЛЛ {_fill:.3f} "
+                              f"| догон={chase_match} | {title[:30]}", flush=True)
                 _tag = "PAPER" if paper else ("SMOKE" if mode == "smoke" else "LIVE")
                 if not ok:                                # ОТКЛОНЁН (fak_not_filled и т.п.)
                     why = resp_reason(resp)
