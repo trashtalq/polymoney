@@ -37,7 +37,12 @@ STATE_KEY = "last_max_ts"
 # Лента ~1М сделок/день. Пыль (< $ нотионала) — в основном бот-спам, режем на входе;
 # сырьё старше RETENTION_DAYS чистим раз в сутки (иначе база растёт на ~100МБ/день).
 MIN_NOTIONAL = float(os.environ.get("FEED_MIN_NOTIONAL", "2"))
-RETENTION_DAYS = int(os.environ.get("FEED_RETENTION_DAYS", "45"))
+# 2026-08-06: было 45 дней -> база доросла до 7.7 ГБ и ЗАБИЛА ДИСК: docker не смог собрать образ,
+# деплой встал на 3 часа. Сканерам столько истории не нужно (окна 7-14 дней), поэтому 12.
+RETENTION_DAYS = int(os.environ.get("FEED_RETENTION_DAYS", "12"))
+# Жёсткий предохранитель: если файл всё же перевалил за это, режем ещё агрессивнее, невзирая на дни.
+MAX_DB_MB = int(os.environ.get("FEED_MAX_DB_MB", "2500"))
+PRUNE_EVERY = int(os.environ.get("FEED_PRUNE_EVERY", "21600"))     # ретеншн раз в 6ч, а не в сутки
 
 
 def log(m):
@@ -46,6 +51,10 @@ def log(m):
 
 def db_open(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(path, timeout=30)
+    # auto_vacuum=INCREMENTAL ДО создания таблиц: без него DELETE освобождает страницы, но ФАЙЛ
+    # не уменьшается никогда (так база и доросла до 7.7 ГБ при работающем ретеншене). С ним можно
+    # возвращать место дешёвым incremental_vacuum, не требующим удвоенного места как полный VACUUM.
+    con.execute("PRAGMA auto_vacuum=INCREMENTAL")
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.execute("""CREATE TABLE IF NOT EXISTS trades(
@@ -151,13 +160,34 @@ def main():
             st = poll_once(con, s)
             if st["inserted"]:
                 log(f"+{st['inserted']} сделок (видел {st['seen']}, новых рынков {st['new_markets']})")
-            if time.time() - last_prune > 86400:      # суточный ретеншн сырья
-                cut = int(time.time()) - RETENTION_DAYS * 86400
+            if time.time() - last_prune > PRUNE_EVERY:
+                days = RETENTION_DAYS
+                mb = os.path.getsize(args.db) / 1e6 if os.path.exists(args.db) else 0
+                # ПРЕДОХРАНИТЕЛЬ: файл выше потолка -> режем окно вдвое, пока не влезем.
+                # Забитый диск валит сборку docker и останавливает деплой всего проекта.
+                while mb > MAX_DB_MB and days > 2:
+                    days //= 2
+                if days != RETENTION_DAYS:
+                    log(f"база {mb:.0f}МБ > потолка {MAX_DB_MB}МБ -> режем окно до {days}д")
+                cut = int(time.time()) - days * 86400
                 n = con.execute("DELETE FROM trades WHERE ts < ?", (cut,)).rowcount
                 con.commit()
                 con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 if n:
-                    log(f"ретеншн: удалено {n} сделок старше {RETENTION_DAYS}д")
+                    # ВОЗВРАЩАЕМ МЕСТО НА ДИСК: без этого DELETE не уменьшает файл.
+                    # incremental_vacuum работает только при auto_vacuum=INCREMENTAL (см. db_open);
+                    # на старых базах, созданных без него, это no-op -> нужен разовый VACUUM.
+                    try:
+                        # .fetchall() ОБЯЗАТЕЛЕН: без него драйвер Python не выполняет этот pragma,
+                        # и место молча не возвращается (проверено: 30.8МБ -> 30.8МБ без fetchall,
+                        # и 30.8 -> 10.3МБ с ним).
+                        con.execute("PRAGMA incremental_vacuum").fetchall()
+                        con.commit()
+                        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    except Exception as ex:  # noqa: BLE001
+                        log(f"incremental_vacuum не сработал ({ex}) — нужен разовый VACUUM")
+                    mb2 = os.path.getsize(args.db) / 1e6 if os.path.exists(args.db) else 0
+                    log(f"ретеншн: удалено {n} сделок старше {days}д | база {mb:.0f} -> {mb2:.0f}МБ")
                 last_prune = time.time()
         except Exception as ex:  # noqa: BLE001
             log(f"цикл упал: {ex}")
