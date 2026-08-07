@@ -546,8 +546,11 @@ class App(tk.Tk):
         w["dot_id"] = w["dot"].create_oval(2, 2, 12, 12, fill=MUT, outline="")
         w["stat"] = ttk.Label(bar, text="остановлен", style="Stat.TLabel")
         w["stat"].pack(side="left")
-        ttk.Label(bar, text=f"  · {c['desc']} · виртуальный банк",
-                  style="Card.TLabel").pack(side="left")
+        ttk.Label(bar, text=f"  · {c['desc']}", style="Card.TLabel").pack(side="left")
+        # ЖИВОЕ ТАБЛО: показания счёта всегда на виду, чтобы не искать их в логе
+        # (сам лог теперь только про события — входы, выходы, пропуски).
+        w["live"] = ttk.Label(bar, text="", style="Money.TLabel")
+        w["live"].pack(side="right")
 
         sc = ttk.Labelframe(root, text="  СЧЁТ ТЕСТА  ", padding=14)
         sc.grid(row=1, column=0, sticky="ew", pady=(0, 10))
@@ -1177,6 +1180,8 @@ class App(tk.Tk):
                 w["cards"]["trades"].config(text=f"{p.get('buys', 0)}/{p.get('sells', 0)}")
                 ts = p.get("ts", 0)
                 ago = int(time.time()) - ts if ts else 0
+                w["live"].config(text=f"${p.get('equity', p.get('bankroll', 0)):,.0f}  "
+                                      f"{p.get('pnl', 0):+,.1f}$  ({p.get('roi', 0):+.2f}%)")
                 w["upd"].config(text=(f"обновлено {ago} сек назад" if ts else "ещё не запускался")
                                 + f"  ·  старт ${p.get('bankroll', 0):,.0f}"
                                 + f"  ·  состав {len(self._c_load(key))}")

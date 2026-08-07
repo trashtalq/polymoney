@@ -1059,9 +1059,19 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
             roi = pnl / pstate["bankroll"] * 100 if pstate["bankroll"] else 0
             pstate["equity"], pstate["pnl"], pstate["roi"] = eq, pnl, round(roi, 2)
             pstate["ts"] = int(time.time())          # чтобы пульт читал свежесть/цифры из файла
-            print(f"  [PAPER] банк ${eq:,.0f} (старт ${pstate['bankroll']:,.0f}) | PnL {pnl:+,.0f}$ "
-                  f"({roi:+.1f}%) | реализ {pstate['realized']:+,.0f}$ | позиций {len(pstate['pos'])} "
-                  f"| кэш ${pstate['cash']:,.0f} | сделок {pstate['buys']}/{pstate['sells']}", flush=True)
+            # Строку состояния в ЛОГ печатаем РЕДКО: она не событие, а показание приборов, и в
+            # пульте живёт в карточках счёта. Раньше сыпалась каждый цикл (раз в 5с) и топила
+            # то, ради чего лог и читают — входы, выходы, пропуски.
+            # список, а не кортеж: после json-сохранения он всё равно станет списком, и сравнение
+            # кортежа со списком давало бы «изменилось» каждый цикл — то есть спам вернулся бы
+            _sig = [pstate["buys"], pstate["sells"]]
+            if _sig != state.get("paper_last_sig") or time.time() - state.get("paper_log_t", 0) > 900:
+                state["paper_last_sig"] = _sig
+                state["paper_log_t"] = time.time()
+                print(f"  [PAPER] банк ${eq:,.0f} (старт ${pstate['bankroll']:,.0f}) | PnL {pnl:+,.0f}$ "
+                      f"({roi:+.1f}%) | реализ {pstate['realized']:+,.0f}$ | позиций {len(pstate['pos'])} "
+                      f"| кэш ${pstate['cash']:,.0f} | сделок {pstate['buys']}/{pstate['sells']}",
+                      flush=True)
             pst_save(pstate)
         # ── ИТОГ ДНЯ в телеграм: раз в сутки после времени TG_DAILY_AT (локальное, деф. 23:30) ──
         _now = time.localtime()
