@@ -708,11 +708,17 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
         _seen_at = time.time()
         for _s in r.get("signals", []):
             if sig_key(_s) not in state["done"] and _s.get("t"):
-                lat_samples.append(round(_seen_at - _s["t"], 1))
+                # max(0,…): часы сервера и наши расходятся на доли секунды, и лаг иногда выходил
+                # отрицательным («мин -0с»). Отрицательной задержки не бывает — это шум часов.
+                lat_samples.append(round(max(0.0, _seen_at - _s["t"]), 1))
         if len(lat_samples) > 3000:
             del lat_samples[:1000]
-        if lat_samples and time.time() - state.get("lat_print_t", 0) > 60:
+        # печатаем, только когда ПРИБАВИЛИСЬ замеры (иначе строка повторяется каждую минуту
+        # с теми же числами и топит лог — как и строка состояния до этого)
+        if lat_samples and len(lat_samples) != state.get("lat_n_printed") \
+                and time.time() - state.get("lat_print_t", 0) > 60:
             state["lat_print_t"] = time.time()
+            state["lat_n_printed"] = len(lat_samples)
             q = sorted(lat_samples)
             med = q[len(q) // 2]
             p90 = q[int(len(q) * 0.9)]
