@@ -68,11 +68,11 @@ CONTOURS = {
             "desc": "боевой состав и реальные цены, виртуальный банк $1000",
             "allow": "copy_allowlist.json", "state": "sim_state.json",
             "exec": "sim_exec_state.json", "hold": "hold_only_sim.json",
-            "tag": "💵 ТЕСТ $1000 (виртуальные)",
-            "env": {"PAPER_BANKROLL": "1000", "PAPER_PER_TRADE": "5",
-                    "PAPER_MAX_PER_WALLET": "100", "PAPER_MIN_PRICE": "0.12",
-                    "PAPER_MAX_PRICE": "0.92", "PAPER_MAX_ENTRIES_PER_POS": "1",
-                    "PAPER_EXIT_MIN_FRAC": "0.1", "PAPER_POLL_SEC": "5"}},
+            "tag": "💵 ТЕСТ $1000 (виртуальные)"},
+            # ВАЖНО: никаких PAPER_*-перекрытий здесь. Раньше они были зашиты (MIN_PRICE 0.12,
+            # MAX_PRICE 0.92, 1 вход в позу…) и МОЛЧА побеждали polymarket.env — то есть и правки
+            # файла, и твои же настройки из «⚙ Настройки теневого» игнорировались этим контуром.
+            # Тюнинг живёт в одном месте — в файле; здесь только пути к состоянию.
     "all": {"tab": "  🌊 Всё (объём)  ",
             "desc": "ВЕСЬ список сервера, без фильтров — максимум сделок для настройки скорости",
             "allow": "all_allowlist.json", "state": "all15k_state.json",
