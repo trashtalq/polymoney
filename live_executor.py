@@ -587,6 +587,12 @@ def resp_ok(resp):
     return True                                      # исключения не было -> считаем принятым
 
 
+def fmt_wallet_cap(v) -> str:
+    """Лимит на кошелёк словами. Ноль здесь = ВЫКЛЮЧЕНО (см. `if max_per_wallet` ниже),
+    но в логе «на кошелёк $0» читалось наоборот — как «ноль долларов разрешено»."""
+    return f"${float(v):g}" if float(v or 0) > 0 else "без лимита"
+
+
 def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_price, poll, max_age,
              max_entries, funder, max_per_wallet, max_resolve_days, exit_min_frac,
              signals_token="", min_price=0.12, paper=False, pstate=None,
@@ -754,7 +760,8 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                     tg_send(f"🛑 <b>СТОП ДНЯ</b>\nпросадка {dd:+.1%} (капитал ${eq:.2f} "
                             f"против ${base:.2f})\nновые входы остановлены, позиции держим")
                 print(f"  [РИСК] капитал ${eq:.2f} (кэш ${cash_:.2f} + позиции ${pv_:.2f}) | "
-                      f"ставка ${per_trade:g} | в позах до ${deposit:g} | на кошелёк ${max_per_wallet:g}"
+                      f"ставка ${per_trade:g} | в позах до ${deposit:g} | в позу до ${cap_usd:g} | "
+                      f"на кошелёк {fmt_wallet_cap(max_per_wallet)}"
                       + (" | ХОЛТ" if state.get("risk_halt") else ""), flush=True)
             # забрать выигранные (иначе капитал заперт в резолвнутых позициях)
             if time.time() - state.get("redeem_t", 0) > 900:
@@ -1184,8 +1191,9 @@ def main():
 
     rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
     print(f"=== live_executor | MODE={mode.upper()} | лимит-в-позах ${deposit} | ставка ${per_trade} | "
-          f"дневной ${daily_max} | на кошелёк ${max_per_wallet}/д | цена {min_price:g}-{max_price:g} | "
-          f"резолв {rezolv} | до {max_entries}x в позу | догон до EV-порога (эдж {drift_edge:g}, "
+          f"дневной ${daily_max} | на кошелёк {fmt_wallet_cap(max_per_wallet)} | "
+          f"цена {min_price:g}-{max_price:g} | "
+          f"резолв {rezolv} | в позу до ${max_entries * per_trade:g} | догон до EV-порога (эдж {drift_edge:g}, "
           f"потолок {drift_max_price:g}) | ВЫХОДЫ вслед за целью (>={exit_min_frac:g}) ===",
           flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
@@ -1224,9 +1232,12 @@ def main():
         pstate["bankroll"] = bankroll
         api = ct.API()
         pclient = PaperClient(pstate, api, slip=float(cfg.get("PAPER_SLIP") or 0.01))
-        print(f"=== ТЕНЕВОЙ (PAPER) | банк ${bankroll:,.0f} | ставка ${p_trade:g} | на кошелёк ${p_wallet:g} "
-              f"| цена {p_minpx:g}-{p_maxpx:g} | до {p_entries}x | реальные кэфы+задержки, БЕЗ денег ===",
-              flush=True)
+        # «на кошелёк $0» читалось как «ноль разрешено», хотя ноль = ЛИМИТ ВЫКЛЮЧЕН (см. `if
+        # max_per_wallet` в run_loop). И лимит на позицию был спрятан за «до 10x» — пишем в деньгах.
+        print(f"=== ТЕНЕВОЙ (PAPER) | банк ${bankroll:,.0f} | ставка ${p_trade:g} | "
+              f"на кошелёк {fmt_wallet_cap(p_wallet)} | в позу до ${p_entries * p_trade:g} "
+              f"({p_entries}x по ${p_trade:g}) | цена {p_minpx:g}-{p_maxpx:g} | "
+              f"реальные кэфы+задержки, БЕЗ денег ===", flush=True)
         run_loop("paper", pclient, server, group, bankroll, p_trade, bankroll, p_maxpx, p_poll, p_age,
                  p_entries, "", p_wallet, p_resolve, p_exit,
                  signals_token=(cfg.get("SIGNALS_TOKEN") or "").strip(), min_price=p_minpx,
