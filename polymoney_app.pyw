@@ -617,9 +617,12 @@ class App(tk.Tk):
         wrap.grid(row=1, column=0, sticky="nsew")
         wrap.columnconfigure(0, weight=1)
         wrap.rowconfigure(0, weight=1)
-        cols = ("mkt", "side", "entry", "target", "delay", "exit", "pnl", "st")
+        # Колонка «Долей» ОБЯЗАТЕЛЬНА: без размера позиции строка «вход 0.46 -> выход 1.00 = +$0.01»
+        # выглядит как сломанный расчёт, хотя это законные полцента с 0.01 доли остаточной пыли.
+        cols = ("mkt", "side", "sh", "entry", "target", "delay", "exit", "pnl", "st")
         self.postree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse")
-        for c, t, w in (("mkt", "Рынок", 320), ("side", "Ставка", 66), ("entry", "Наш вход", 78),
+        for c, t, w in (("mkt", "Рынок", 300), ("side", "Ставка", 60), ("sh", "Долей", 62),
+                        ("entry", "Наш вход", 78),
                         ("target", "Цена цели", 78), ("delay", "Задержка $", 90),
                         ("exit", "Наш выход", 78), ("pnl", "Реализ $", 80), ("st", "", 34)):
             self.postree.heading(c, text=t)
@@ -631,6 +634,7 @@ class App(tk.Tk):
         self.postree.tag_configure("open", foreground=ACC)
         self.postree.tag_configure("win", foreground=GRN)
         self.postree.tag_configure("lose", foreground=RED)
+        self.postree.tag_configure("dust", foreground=MUT)
 
     def refresh_positions(self):
         if not hasattr(self, 'postree'):
@@ -650,8 +654,10 @@ class App(tk.Tk):
             d = dlay(entry, target, pos.get("shares", 0))
             if d is not None:
                 total_delay += d
-            self.postree.insert("", "end", tags=("open",), values=(
+            osh = pos.get("shares", 0)
+            self.postree.insert("", "end", tags=("dust" if osh < 0.05 else "open",), values=(
                 pos.get("title", "")[:52], pos.get("outcome", "")[:6],
+                f"{osh:g}" + (" пыль" if osh < 0.05 else ""),
                 f"{entry:.3f}", f"{target:.3f}" if target else "—",
                 f"{d:+.2f}" if d is not None else "—", "—", "открыта", "🟢"))
         for c in reversed(p.get("closed") or []):               # закрытые, свежие сверху
@@ -661,8 +667,13 @@ class App(tk.Tk):
             if d is not None:
                 total_delay += d
             real = c.get("realized", 0)
-            self.postree.insert("", "end", tags=("win" if real > 0 else "lose",), values=(
+            sh = c.get("shares", 0)
+            # Хвост меньше сотой доли — не сделка, а остаток от округления при продаже. Помечаем,
+            # чтобы его копеечный PnL не читался как результат позиции.
+            tag = "dust" if sh < 0.05 else ("win" if real > 0 else "lose")
+            self.postree.insert("", "end", tags=(tag,), values=(
                 c.get("title", "")[:52], c.get("outcome", "")[:6],
+                f"{sh:g}" + (" пыль" if sh < 0.05 else ""),
                 f"{entry:.3f}", f"{target:.3f}" if target else "—",
                 f"{d:+.2f}" if d is not None else "—", f"{c.get('exit_px', 0):.3f}",
                 f"{real:+.2f}", "✓"))

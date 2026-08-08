@@ -1007,9 +1007,13 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                       f"{exit_min_frac*100:.0f}%) — держим: {xtitle[:36]}", flush=True)
                 state["done"].append(xk)
                 continue
-            shares = math.floor(held.get(tok, {}).get("shares", 0.0) * 100) / 100   # вниз, не оверселл
-            invested = held.get(tok, {}).get("usd", 0.0)      # для PnL в уведомлении
             hs = held.get(tok, {}).get("shares", 0.0)
+            # Реал округляем ВНИЗ до сотой — иначе биржа отклонит ордер за оверселл. Но в бумажном
+            # это округление оставляло хвост (держали 10.87 -> продали 10.86), и 0.01 доли жила до
+            # резолва, всплывая отдельной строкой «+0.01» — её легко принять за сломанный расчёт.
+            # У бумажного журнала лота нет и оверселл невозможен: продаём ровно то, что держим.
+            shares = hs if paper else math.floor(hs * 100) / 100
+            invested = held.get(tok, {}).get("usd", 0.0)      # для PnL в уведомлении
             entry_avg = (invested / hs) if hs else 0          # НАША средняя цена входа
             if shares <= 0:                                   # мы это не держим -> нечего продавать
                 print(f"  выход цели, но позиции у нас нет (не копировали вход): {xtitle[:40]}",
