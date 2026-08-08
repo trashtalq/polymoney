@@ -832,13 +832,16 @@ class App(tk.Tk):
             self.paper_uptime += time.time() - self.paper_started
             self.paper_started = None
             self._save_uptime(self.paper_uptime)
-            self._log_raw(f"■ Теневой остановлен. Всего наработано {self._fmt_dur(self.paper_uptime)}.",
-                          "muted", self.plog)
-        else:
-            self._log_raw("■ Теневой бот остановлен.", "muted", self.plog)
-        self.pstart_btn.config(text="▶  Запустить теневой", style="Accent.TButton")
-        self.pdot.itemconfig(self._pdot_id, fill=MUT)
-        self.pstat_lbl.config(text="остановлен")
+        # Виджеты вкладки могут отсутствовать (вкладка скрыта через SHOW_TABS). Раньше обращение
+        # к ним бросало AttributeError прямо в обработчике закрытия окна -> пульт НЕ ЗАКРЫВАЛСЯ:
+        # крестик нажат, «да» подтверждено, а destroy() до выполнения не доходил.
+        _log = getattr(self, "plog", None)
+        if _log is not None:
+            self._log_raw("■ Теневой бот остановлен.", "muted", _log)
+        if hasattr(self, "pstart_btn"):
+            self.pstart_btn.config(text="▶  Запустить теневой", style="Accent.TButton")
+            self.pdot.itemconfig(self._pdot_id, fill=MUT)
+            self.pstat_lbl.config(text="остановлен")
 
     @staticmethod
     def _fmt_dur(sec):
@@ -1405,10 +1408,15 @@ class App(tk.Tk):
         if (self.proc or self.paper_proc or any(self.cproc.values())) and not messagebox.askyesno(
                 "Боты работают", "Бот(ы) ещё запущены. Остановить и выйти?"):
             return
-        self.stop_bot()
-        self.stop_paper()
-        for _k in CONTOURS:
-            self.stop_contour(_k)
+        # ЗАКРЫТИЕ НЕПРОБИВАЕМО: любая ошибка внутри обработчика раньше не давала окну закрыться
+        # (пользователь жал крестик и «да», а пульт оставался висеть). Гасим ботов по одному,
+        # каждый в своей защите, и destroy() выполняем в ЛЮБОМ случае.
+        for _step in (self.stop_bot, self.stop_paper,
+                      *[(lambda k=k: self.stop_contour(k)) for k in CONTOURS]):
+            try:
+                _step()
+            except Exception as ex:  # noqa: BLE001
+                print(f"[закрытие] шаг пропущен: {ex}")
         if self._client is not None:
             try:
                 self._client.close()
