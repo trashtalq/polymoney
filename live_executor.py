@@ -738,8 +738,14 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 # влияет только на мирроринг выходов по унаследованным позициям.
                 hold_ws = {w for t, w in (state.get("tok_wallet") or {}).items() if t in held and w}
                 params["wallets"] = ",".join(sorted(set(allow) | hold_ws))
-            else:                                      # allowlist пуст -> лента группы (fallback)
+            else:
+                # Пустой локальный состав + лента группы = копируем кошельки, которых МЫ НЕ
+                # ВЫБИРАЛИ (состав группы живёт на сервере). Раньше это происходило молча.
                 params["g"] = group
+                if not state.get("warned_group_feed"):
+                    state["warned_group_feed"] = True
+                    print(f"  !! локальный состав ПУСТ -> копируем состав группы '{group}' "
+                          f"С СЕРВЕРА. Это не твой список кошельков.", flush=True)
             if direct_src is not None and allow:
                 # ПРЯМОЙ ИСТОЧНИК: опрашиваем data-api сами -> латентность = интервал опроса
                 # (5-15с) вместо 45-90с через наш сервер. Формат ответа идентичен.
@@ -1315,14 +1321,27 @@ def main():
     if feed_path.endswith("raw_signals"):
         print("лента сигналов: СЫРАЯ (без фильтров категорий) — режим объёма", flush=True)
     direct_src = None
-    if (cfg.get("SIGNAL_SOURCE") or "server").strip().lower() == "direct":
+    # ПРЯМОЙ ИСТОЧНИК — режим по умолчанию. Через сервер работаем только если попросили явно
+    # (SIGNAL_SOURCE=server): у сервера СВОЙ состав группы, и он не обязан совпадать с нашим —
+    # замер: в группе core 17 кошельков, у нас 7, пересечение 3. Отвались прямой источник тихо,
+    # мы бы поехали на чужом составе и перестали получать сигналы 4 своих кошельков БЕЗ единой
+    # строки в логе. Поэтому отката больше нет: не смогли — не поехали.
+    _src = (cfg.get("SIGNAL_SOURCE") or "direct").strip().lower()
+    if _src == "direct":
         try:
             from direct_source import DirectSource
             direct_src = DirectSource()
             print("источник сигналов: ПРЯМОЙ (data-api) — минуем сервер, латентность ~интервал опроса",
                   flush=True)
         except Exception as ex:  # noqa: BLE001
-            print(f"!! прямой источник недоступен ({ex}) — работаем через сервер", flush=True)
+            print(f"!! СТАРТ ОТМЕНЁН: прямой источник недоступен ({ex}).\n"
+                  f"   Молча уехать на серверную ленту нельзя — там ДРУГОЙ состав кошельков.\n"
+                  f"   Чинить direct_source.py либо осознанно поставить SIGNAL_SOURCE=server "
+                  f"в polymarket.env.", flush=True)
+            return
+    else:
+        print(f"источник сигналов: СЕРВЕР ({_src}) — состав группы '{group}' задаётся НА СЕРВЕРЕ "
+              f"и может не совпадать с локальным", flush=True)
 
     rezolv = f"<={max_resolve_days:g}д" if max_resolve_days else "без фильтра"
     print(f"=== live_executor | MODE={mode.upper()} | лимит-в-позах ${deposit} | ставка ${per_trade} | "
