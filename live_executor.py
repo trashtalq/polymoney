@@ -109,7 +109,7 @@ def load_env():
         "SIGNALS_TOKEN", "TG_ENABLED", "TG_TOKEN", "TG_CHAT", "TG_TAG", "TG_SUMMARY_H",
         "TG_DAILY_AT", "TG_PAPER", "DRIFT_EDGE", "DRIFT_MARGIN", "DRIFT_MAX_PRICE", "DRIFT_MIN", "RISK_PCT",
         "RISK_DEPLOY_PCT", "RISK_TRADE_PCT", "RISK_DAY_PCT", "RISK_WALLET_PCT", "RISK_STOP_DD",
-        "RISK_TRADE_MAX")})
+        "RISK_TRADE_MAX", "MAX_OVERPAY_PCT", "MAX_ENTRIES_PER_MARKET")})
     return cfg
 
 
@@ -399,9 +399,10 @@ def fetch_held(s, funder):
         cost = p.get("initialValue")
         if cost is None:
             cost = (p.get("size") or 0) * (p.get("avgPrice") or 0)
-        d = out.setdefault(a, {"usd": 0.0, "shares": 0.0})
+        d = out.setdefault(a, {"usd": 0.0, "shares": 0.0, "cid": ""})
         d["usd"] += float(cost or 0)
         d["shares"] += float(p.get("size") or 0)
+        d["cid"] = d["cid"] or str(p.get("conditionId") or "")   # для лимита входов на РЫНОК
     return out
 
 
@@ -425,7 +426,8 @@ def pst_save(p):
 
 def paper_held(p):
     """held-снимок как fetch_held, но по ВИРТУАЛЬНЫМ позициям: {tok:{usd:вложено, shares:долей}}."""
-    return {t: {"usd": v["cost"], "shares": v["shares"]} for t, v in p["pos"].items()}
+    return {t: {"usd": v["cost"], "shares": v["shares"], "cid": v.get("cid") or ""}
+            for t, v in p["pos"].items()}
 
 
 def paper_equity(p, api):
@@ -600,7 +602,7 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
              drift_edge=0.22, drift_margin=0.03, drift_max_price=0.70, drift_min=0.02,
              risk_pct=True, risk_deploy=0.65, risk_trade=0.02, risk_day=0.15,
              risk_wallet=0.10, risk_stop_dd=0.10, risk_trade_max=100.0, direct_src=None,
-             feed_path="/api/signals"):
+             feed_path="/api/signals", max_overpay=0.15, max_per_market=3):
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     if signals_token:                                 # сервер закрыл /api/signals токеном -> шлём его
@@ -853,6 +855,21 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 continue
             if stake > room:                          # места меньше ставки -> входим на остаток
                 stake = round(room, 2)
+            # ЛИМИТ НА РЫНОК: лимит выше считает ТОКЕН, а цели переоткрывают одну и ту же ставку
+            # помногу раз — и через разные исходы одного рынка. Так набралось 13 входов в «Andy
+            # Ogles» и 5 в «Kai and Speed»: каждый в пределах своего токена, а вместе — крупная
+            # концентрация в одном событии. Считаем ОТКРЫТЫЕ позиции по этому cid.
+            sig_cid = str(sig.get("cid") or "")
+            if max_per_market and sig_cid:
+                # ОДНОВРЕМЕННО открытые позиции этого рынка (пыль от округления не в счёт).
+                # Лимит сам освобождается, когда позиции закрываются, — как лимит на кошелёк.
+                mkt_toks = {t for t, v in held.items()
+                            if v.get("cid") == sig_cid and v.get("shares", 0) > 0.05}
+                if sig["tok"] not in mkt_toks and len(mkt_toks) >= max_per_market:
+                    print(f"  skip (в этом рынке уже {len(mkt_toks)} позиций из "
+                          f"{max_per_market} — концентрация): {title}", flush=True)
+                    state["done"].append(k)
+                    continue
             # ЛИМИТ НА КОШЕЛЁК = сумма его ТЕКУЩИХ открытых позиций (не расход за сутки). Частильщик
             # входит снова, ТОЛЬКО когда его прошлые позиции закрылись (в плюс/минус — неважно, held
             # упал). При funder считаем по реальной экспозиции; без funder (dry) — старый дневной счётчик.
@@ -916,7 +933,17 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                 cap_raw = min(cap_raw, drift_max_price)
             elif not chase_match:                    # цена на месте -> платим около цены цели
                 cap_raw = min(cap_raw, entry_px + 0.02)
-            cap = math.ceil(cap_raw * 100 - 1e-9) / 100
+            # ОТНОСИТЕЛЬНЫЙ ПОТОЛОК — поверх ВСЕХ веток, включая drifted. Абсолютный эдж 0.22
+            # разумен на дорогих рынках и абсурден на дешёвых: при цели 0.029 EV-кап разрешал
+            # платить до 0.25 (8.6x!), и ветка drifted снимала якорь «+2 цента». Замер по 129
+            # входам: 56 прошли дороже цели больше чем на 2 цента, переплата -$82.50, из них
+            # MrBeast -$13 (цель 0.029, взяли 0.065 -> вдвое меньше долей за те же деньги).
+            if max_overpay > 0 and px > 0:
+                cap_raw = min(cap_raw, px * (1 + max_overpay))
+            # Округление ВВЕРХ по шагу цены: на копеечных рынках шаг в цент сам по себе больше
+            # всего допуска (0.029 -> 0.04 это +38%), поэтому ниже 0.10 считаем по тысячным.
+            tick = 0.01 if cap_raw >= 0.10 else 0.001
+            cap = round(math.ceil(cap_raw / tick - 1e-9) * tick, 4)
             try:
                 resp = client.place_market_order(
                     token_id=sig["tok"], side="BUY", amount=float(stake),
@@ -1159,6 +1186,12 @@ def main():
     #   освобождают ВЫХОДЫ вслед за целью, не пред-фильтр; цели флипают и долгие рынки)
     exit_min_frac = float(cfg.get("EXIT_MIN_FRAC") or 0.1)      # выходим, как только цель продала >= этой
     #   доли своего холдинга (0.1 = на первую значимую продажу; 0.01 = на ЛЮБУЮ; выше = только на крупный выход)
+    # Не платим дороже цели больше чем на эту долю (0.15 = +15%). Главный предохранитель против
+    # переплаты на дешёвых рынках, где абсолютные центы ничего не ограничивают. 0 = выключить.
+    max_overpay = float(cfg.get("MAX_OVERPAY_PCT") or 0.15)
+    # Входов в ОДИН РЫНОК (cid), а не в токен. Цели переоткрывают одну ставку по многу раз:
+    # замер — 13 входов в «Andy Ogles» (-$220 при удержании) и 5 в «Kai and Speed» (-$32).
+    max_per_market = int(cfg.get("MAX_ENTRIES_PER_MARKET") or 3)
     chase_match = bool(int(float(cfg.get("CHASE_MATCH") or 0)))  # догон: докупать до долей цели (плата за лаг)
     chase_max_mult = float(cfg.get("CHASE_MAX_MULT") or 2.0)     # потолок множителя ставки при догоне
     # EV-гейт уехавшей цены: allowed = (цена_цели + DRIFT_EDGE) / (1 + DRIFT_MARGIN), но не выше
@@ -1197,7 +1230,8 @@ def main():
     print(f"=== live_executor | MODE={mode.upper()} | лимит-в-позах ${deposit} | ставка ${per_trade} | "
           f"дневной ${daily_max} | на кошелёк {fmt_wallet_cap(max_per_wallet)} | "
           f"цена {min_price:g}-{max_price:g} | "
-          f"резолв {rezolv} | в позу до ${max_entries * per_trade:g} | догон до EV-порога (эдж {drift_edge:g}, "
+          f"резолв {rezolv} | в позу до ${max_entries * per_trade:g}, в рынок {max_per_market} поз | "
+          f"не дороже цели на {max_overpay * 100:.0f}% | догон до EV-порога (эдж {drift_edge:g}, "
           f"потолок {drift_max_price:g}) | ВЫХОДЫ вслед за целью (>={exit_min_frac:g}) ===",
           flush=True)
     print(f"сигналы: {server}/api/signals?g={group}", flush=True)
@@ -1221,6 +1255,8 @@ def main():
         p_poll = int(pf("PAPER_POLL_SEC", poll))
         p_chase = bool(int(pf("PAPER_CHASE_MATCH", 0)))
         p_chase_mult = pf("PAPER_CHASE_MAX_MULT", 2.0)
+        p_over = pf("PAPER_MAX_OVERPAY_PCT", max_overpay)
+        p_mkt = int(pf("PAPER_MAX_ENTRIES_PER_MARKET", max_per_market))
         pstate = pst_load(bankroll)
         # СТАРТОВЫЙ БАНК — база для PnL/ROI, и менять его на живом состоянии НЕЛЬЗЯ: кэш и позиции
         # останутся от прежнего прогона, а PnL посчитается от новой базы. Реальный случай: контур
@@ -1240,7 +1276,8 @@ def main():
         # max_per_wallet` в run_loop). И лимит на позицию был спрятан за «до 10x» — пишем в деньгах.
         print(f"=== ТЕНЕВОЙ (PAPER) | банк ${bankroll:,.0f} | ставка ${p_trade:g} | "
               f"на кошелёк {fmt_wallet_cap(p_wallet)} | в позу до ${p_entries * p_trade:g} "
-              f"({p_entries}x по ${p_trade:g}) | цена {p_minpx:g}-{p_maxpx:g} | "
+              f"({p_entries}x по ${p_trade:g}), в рынок {p_mkt} поз | "
+              f"не дороже цели на {p_over * 100:.0f}% | цена {p_minpx:g}-{p_maxpx:g} | "
               f"реальные кэфы+задержки, БЕЗ денег ===", flush=True)
         run_loop("paper", pclient, server, group, bankroll, p_trade, bankroll, p_maxpx, p_poll, p_age,
                  p_entries, "", p_wallet, p_resolve, p_exit,
@@ -1251,7 +1288,9 @@ def main():
                  drift_max_price=drift_max_price, drift_min=drift_min,
                  risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
                  risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
-                 risk_trade_max=risk_trade_max, direct_src=direct_src, feed_path=feed_path)
+                 risk_trade_max=risk_trade_max, direct_src=direct_src, feed_path=feed_path,
+                 max_overpay=pf("PAPER_MAX_OVERPAY_PCT", max_overpay),
+                 max_per_market=int(pf("PAPER_MAX_ENTRIES_PER_MARKET", max_per_market)))
         return
 
     if mode == "dry":
@@ -1264,7 +1303,8 @@ def main():
                  drift_max_price=drift_max_price, drift_min=drift_min,
                  risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
                  risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
-                 risk_trade_max=risk_trade_max, direct_src=direct_src, feed_path=feed_path)
+                 risk_trade_max=risk_trade_max, direct_src=direct_src, feed_path=feed_path,
+                 max_overpay=max_overpay, max_per_market=max_per_market)
         return
 
     # smoke/live: нужен ключ + новый SDK + адрес депозита (FUNDER)
@@ -1297,7 +1337,8 @@ def main():
                  drift_max_price=drift_max_price, drift_min=drift_min,
                  risk_pct=risk_pct, risk_deploy=risk_deploy, risk_trade=risk_trade,
                  risk_day=risk_day, risk_wallet=risk_wallet, risk_stop_dd=risk_stop_dd,
-                 risk_trade_max=risk_trade_max, direct_src=direct_src, feed_path=feed_path)
+                 risk_trade_max=risk_trade_max, direct_src=direct_src, feed_path=feed_path,
+                 max_overpay=max_overpay, max_per_market=max_per_market)
 
 
 if __name__ == "__main__":
