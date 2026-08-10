@@ -448,6 +448,35 @@ def paper_equity(p, api):
     return eq, round(eq - p["bankroll"], 2)
 
 
+def paper_deposit_file():
+    """Заявка на пополнение виртуального банка: рядом с файлом состояния, <имя>.deposit."""
+    return PAPER_FILE.with_name(PAPER_FILE.stem + ".deposit")
+
+
+def apply_pending_deposit(pstate):
+    """Пополнение применяет САМ БОТ на своём цикле, а не сторонний процесс. Иначе правку файла
+    затирает состояние из памяти работающего контура (он пишет раз в несколько секунд).
+    База PnL двигается ВМЕСТЕ с деньгами: иначе внесённые $10k мгновенно нарисуются прибылью
+    (PnL = equity - bankroll). Пополнение — это не доход."""
+    f = paper_deposit_file()
+    if not f.exists():
+        return None
+    try:
+        amt = float(json.loads(f.read_text(encoding="utf-8")).get("usd") or 0)
+    except Exception:  # noqa: BLE001
+        amt = 0.0
+    try:
+        f.unlink()                                   # заявка одноразовая, даже если она мусорная
+    except OSError:
+        pass
+    if amt <= 0:
+        return None
+    pstate["cash"] = round(pstate["cash"] + amt, 2)
+    pstate["bankroll"] = round(pstate["bankroll"] + amt, 2)
+    pstate["deposits"] = round(float(pstate.get("deposits") or 0) + amt, 2)
+    return amt
+
+
 def paper_settle(pstate, api, batch=30):
     """РЕЗОЛВ виртуальных позиций: рынок разрешён (оракул CLOB) -> редимим долю в кэш
     (winner 1.0/0.0), реализуем PnL, убираем из открытых. Иначе резолвнутые позиции копятся
@@ -1098,6 +1127,12 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
                                if t in held or t in session_add}
         st_save(state)
         if paper:                                    # теневой отчёт: виртуальный банк и PnL
+            _dep = apply_pending_deposit(pstate)     # заявка на пополнение, если её положили
+            if _dep:
+                print(f"  [БАНК] пополнение +${_dep:,.2f} -> кэш ${pstate['cash']:,.2f}, "
+                      f"база PnL ${pstate['bankroll']:,.2f} (прибылью НЕ считается)", flush=True)
+                tg_send(f"💰 <b>Пополнение теста</b> +${_dep:,.2f}\n"
+                        f"кэш ${pstate['cash']:,.2f} · база ${pstate['bankroll']:,.2f}")
             paper_settle(pstate, client.api)         # редимим резолвнутые позы в кэш (стаггером)
             eq, pnl = paper_equity(pstate, client.api)
             roi = pnl / pstate["bankroll"] * 100 if pstate["bankroll"] else 0
@@ -1263,6 +1298,9 @@ def main():
         # работал со стартом $15000, в env поставили 200 -> показало PnL +14791 и ROI +7395%.
         _old_bank = float(pstate.get("bankroll") or 0)
         _traded = int(pstate.get("buys", 0)) + int(pstate.get("sells", 0)) > 0
+        # Пополнения — законная причина расхождения базы с env: банк вырос на внесённые деньги.
+        # Без этой поправки контур ругался бы при КАЖДОМ старте и звал удалить файл состояния.
+        bankroll += float(pstate.get("deposits") or 0)
         if _traded and abs(_old_bank - bankroll) > 1e-6:
             print(f"!! PAPER_BANKROLL={bankroll:g}, но контур уже торговал со стартом "
                   f"{_old_bank:g} — оставляю {_old_bank:g}, иначе PnL/ROI станут враньём.\n"

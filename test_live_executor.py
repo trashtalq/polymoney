@@ -303,5 +303,56 @@ class TestPaperExecution(unittest.TestCase):
         self.assertAlmostEqual(pnl, 10.0, places=2)
 
 
+class TestDeposit(unittest.TestCase):
+    """Пополнение виртуального банка НЕ ДОЛЖНО выглядеть прибылью: PnL = equity - bankroll,
+    поэтому база обязана двигаться вместе с кэшем. Если это сломать, внесённые деньги
+    мгновенно нарисуются как доход и весь PnL/ROI контура станет враньём."""
+
+    def setUp(self):
+        self.f = le.paper_deposit_file()
+        if self.f.exists():
+            self.f.unlink()
+
+    def tearDown(self):
+        if self.f.exists():
+            self.f.unlink()
+
+    class _API:
+        def midpoints(self, toks):
+            return {t: 0.50 for t in toks}
+
+    def test_deposit_does_not_create_profit(self):
+        p = {"bankroll": 1000.0, "cash": 100.0, "pos": {"T": {"shares": 200.0, "cost": 900.0}}}
+        _, pnl_before = le.paper_equity(p, self._API())
+        self.f.write_text(json.dumps({"usd": 10000}), encoding="utf-8")
+        self.assertEqual(le.apply_pending_deposit(p), 10000.0)
+        _, pnl_after = le.paper_equity(p, self._API())
+        self.assertAlmostEqual(pnl_before, pnl_after, places=2,
+                               msg="пополнение изменило PnL — база не поехала за деньгами")
+        self.assertAlmostEqual(p["cash"], 10100.0, places=2)
+        self.assertAlmostEqual(p["bankroll"], 11000.0, places=2)
+        self.assertAlmostEqual(p["deposits"], 10000.0, places=2)
+
+    def test_request_is_one_shot(self):
+        p = {"bankroll": 1000.0, "cash": 0.0, "pos": {}}
+        self.f.write_text(json.dumps({"usd": 500}), encoding="utf-8")
+        self.assertEqual(le.apply_pending_deposit(p), 500.0)
+        self.assertFalse(self.f.exists(), "заявка обязана исчезнуть, иначе банк растёт каждый цикл")
+        self.assertIsNone(le.apply_pending_deposit(p))
+
+    def test_garbage_request_is_dropped_not_applied(self):
+        p = {"bankroll": 1000.0, "cash": 7.0, "pos": {}}
+        self.f.write_text("не json", encoding="utf-8")
+        self.assertIsNone(le.apply_pending_deposit(p))
+        self.assertEqual(p["cash"], 7.0)
+        self.assertFalse(self.f.exists())
+
+    def test_negative_amount_ignored(self):
+        p = {"bankroll": 1000.0, "cash": 7.0, "pos": {}}
+        self.f.write_text(json.dumps({"usd": -5000}), encoding="utf-8")
+        self.assertIsNone(le.apply_pending_deposit(p))
+        self.assertEqual(p["cash"], 7.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
