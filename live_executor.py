@@ -1198,8 +1198,15 @@ def run_loop(mode, client, server, group, deposit, per_trade, daily_max, max_pri
         if paper:                                    # теневой отчёт: виртуальный банк и PnL
             _dep = apply_pending_deposit(pstate)     # заявка на пополнение, если её положили
             if _dep:
+                # ЛИМИТЫ ЕДУТ ЗА БАНКОМ. deposit/daily_max связываются значением при ВЫЗОВЕ
+                # run_loop, поэтому пополнение на лету их не двигало: банк стал $11,000, а
+                # потолок экспозиции остался $1,000 — бот упёрся в «депозит исчерпан» с полным
+                # кэшем на руках и пропускал каждый сигнал.
+                deposit = pstate["bankroll"]
+                daily_max = pstate["bankroll"]
                 print(f"  [БАНК] пополнение +${_dep:,.2f} -> кэш ${pstate['cash']:,.2f}, "
-                      f"база PnL ${pstate['bankroll']:,.2f} (прибылью НЕ считается)", flush=True)
+                      f"база PnL ${pstate['bankroll']:,.2f} (прибылью НЕ считается)\n"
+                      f"         лимит в позах и дневной подняты до ${deposit:,.2f}", flush=True)
                 tg_send(f"💰 <b>Пополнение теста</b> +${_dep:,.2f}\n"
                         f"кэш ${pstate['cash']:,.2f} · база ${pstate['bankroll']:,.2f}")
             paper_settle(pstate, client.api)         # редимим резолвнутые позы в кэш (стаггером)
