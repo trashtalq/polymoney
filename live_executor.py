@@ -25,6 +25,7 @@ live_executor.py — ЛОКАЛЬНЫЙ исполнитель реальных 
   copy polymarket.env.example polymarket.env   — впиши PRIVATE_KEY и FUNDER
   python live_executor.py                       — стартует в dry (сделок нет)
 """
+import atexit
 import json
 import math
 import os
@@ -446,6 +447,60 @@ def paper_equity(p, api):
         val += v["shares"] * px
     eq = round(p["cash"] + val, 2)
     return eq, round(eq - p["bankroll"], 2)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Жив ли процесс. На Windows os.kill(pid, 0) НЕ ГОДИТСЯ: там это TerminateProcess,
+    то есть проверка убила бы проверяемого. Спрашиваем ядро через OpenProcess."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)          # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        # ОТКРЫТЫЙ ХЭНДЛ ЕЩЁ НЕ ЗНАЧИТ «ЖИВ»: пока кто-то держит хэндл, объект процесса
+        # существует и после выхода. Без этой проверки замок от УМЕРШЕГО контура запирал бы
+        # счёт навсегда. Спрашиваем код возврата: STILL_ACTIVE (259) = действительно работает.
+        code = ctypes.c_ulong()
+        got = k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return bool(got) and code.value == 259
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+
+
+def claim_paper_state():
+    """ЗАМОК на файл счёта: два контура с одним PAPER_STATE_FILE затирают друг друга.
+    Реальный случай: старый процесс от 09:33 держал в памяти банк $1000 и каждый цикл
+    возвращал его поверх пополненного — счёт мигал между $11,000 и $1,000, а пополнение
+    «пропадало». Оба процесса при этом считали, что работают нормально.
+    Возвращает (ok, сообщение)."""
+    lock = PAPER_FILE.with_name(PAPER_FILE.stem + ".lock")
+    if lock.exists():
+        try:
+            d = json.loads(lock.read_text(encoding="utf-8"))
+            pid = int(d.get("pid") or 0)
+        except Exception:  # noqa: BLE001
+            pid = 0
+        if pid and pid != os.getpid() and _pid_alive(pid):
+            return False, (f"счёт {PAPER_FILE.name} уже занят процессом PID {pid} "
+                           f"(запущен {d.get('started', '?')}). Два контура на один счёт "
+                           f"затирают друг друга — закрой лишний и запусти снова.")
+    try:
+        lock.write_text(json.dumps({"pid": os.getpid(),
+                                    "started": time.strftime("%Y-%m-%d %H:%M:%S")}),
+                        encoding="utf-8")
+    except OSError:
+        pass                                          # замок — страховка, а не обязательное условие
+    atexit.register(lambda: lock.unlink(missing_ok=True))
+    return True, ""
 
 
 def paper_deposit_file():
@@ -1290,6 +1345,10 @@ def main():
         p_poll = int(pf("PAPER_POLL_SEC", poll))
         p_chase = bool(int(pf("PAPER_CHASE_MATCH", 0)))
         p_chase_mult = pf("PAPER_CHASE_MAX_MULT", 2.0)
+        _ok, _why = claim_paper_state()          # ДО чтения состояния: иначе прочитаем и затрём чужое
+        if not _ok:
+            print(f"!! СТАРТ ОТМЕНЁН: {_why}", flush=True)
+            return
         p_over = pf("PAPER_MAX_OVERPAY_PCT", max_overpay)
         p_mkt = int(pf("PAPER_MAX_ENTRIES_PER_MARKET", max_per_market))
         pstate = pst_load(bankroll)
