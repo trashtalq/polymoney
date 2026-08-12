@@ -613,6 +613,11 @@ class App(tk.Tk):
         self.posdelay_lbl.pack(side="left", padx=(16, 0))
         ttk.Button(top, text="🔄 Обновить", style="Small.TButton",
                    command=self.refresh_positions).pack(side="right")
+        # ДВЕ КНИГИ В ОДНОЙ ЦИФРЕ. Позиции, набранные до починки капа переплаты, и позиции по
+        # новым правилам ведут себя по-разному, а общий PnL их смешивает и вводит в заблуждение.
+        # Показываем раздельно: старая книга догорает сама, судить о работе надо по новой.
+        self.poscoh_lbl = ttk.Label(root, text="", style="Card.TLabel", justify="left")
+        self.poscoh_lbl.grid(row=2, column=0, sticky="w", pady=(8, 0))
         wrap = ttk.Frame(root)
         wrap.grid(row=1, column=0, sticky="nsew")
         wrap.columnconfigure(0, weight=1)
@@ -678,6 +683,43 @@ class App(tk.Tk):
                 f"{d:+.2f}" if d is not None else "—", f"{c.get('exit_px', 0):.3f}",
                 f"{real:+.2f}", "✓"))
         self.posdelay_lbl.config(text=f"потеряно на задержке: {total_delay:+,.2f}$")
+        self._refresh_cohorts(p)
+
+    # Момент, с которого работает кап переплаты и лимит на рынок (первый запуск с ними).
+    # Позиции старше набраны когда кап не блокировал НИ ОДНОГО входа из 129 — смешивать нельзя.
+    NEW_RULES_T = 1786403580          # 2026-08-11 02:13
+
+    def _refresh_cohorts(self, p):
+        """Две книги раздельно: до починки капа и после. Считает по отметкам цены, которые
+        кладёт бот (pos.mark) — сети из GUI не трогаем."""
+        if not hasattr(self, "poscoh_lbl"):
+            return
+        agg = {"old": {"n": 0, "inv": 0.0, "un": 0.0, "nc": 0, "re": 0.0, "marked": 0},
+               "new": {"n": 0, "inv": 0.0, "un": 0.0, "nc": 0, "re": 0.0, "marked": 0}}
+        for v in (p.get("pos") or {}).values():
+            a = agg["new" if v.get("t_open", 0) >= self.NEW_RULES_T else "old"]
+            sh, e = v.get("shares", 0), v.get("entry", 0)
+            a["n"] += 1
+            a["inv"] += sh * e
+            m = v.get("mark")
+            if m:                                     # без отметки нереализованный не считаем
+                a["un"] += sh * float(m) - sh * e
+                a["marked"] += 1
+        for c in (p.get("closed") or []):
+            a = agg["new" if c.get("t_open", 0) >= self.NEW_RULES_T else "old"]
+            a["nc"] += 1
+            a["re"] += c.get("realized", 0)
+        out = []
+        for key, name in (("old", "старая книга (до починки капа)"), ("new", "по новым правилам")):
+            a = agg[key]
+            if not (a["n"] or a["nc"]):
+                continue
+            tot = a["un"] + a["re"]
+            miss = "" if a["marked"] == a["n"] else f", без цены {a['n'] - a['marked']}"
+            out.append(f"{name}: открытых {a['n']} на ${a['inv']:,.0f}{miss} · "
+                       f"переоценка {a['un']:+,.2f}$ · закрыто {a['nc']} на {a['re']:+,.2f}$ "
+                       f"→ итого {tot:+,.2f}$")
+        self.poscoh_lbl.config(text="\n".join(out) or "нет данных по книгам")
 
     def _poll_positions(self):
         try:

@@ -445,6 +445,9 @@ def paper_equity(p, api):
         m = marks.get(t)
         px = float(m) if m is not None else (v["cost"] / v["shares"] if v["shares"] else 0)
         val += v["shares"] * px
+        # Кладём отметку в позицию: пульт читает только файл состояния и без неё не может
+        # показать нереализованный PnL, а лезть в стакан из GUI на каждом обновлении — дорого.
+        v["mark"] = round(px, 4)
     eq = round(p["cash"] + val, 2)
     return eq, round(eq - p["bankroll"], 2)
 
