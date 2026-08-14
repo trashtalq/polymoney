@@ -132,6 +132,22 @@ PRICE_NOISE_KW = (
     "be between $", "closes above", "closes below", "close above", "close below",
 )
 
+# КОНТЕНТ И СТРИМЫ (2026-08-14): просмотры/подписчики, стрим-марафоны, сборы кино, чарты
+# Netflix/Spotify. Замер по тесту на $11,000: 30 закрытых сделок в этом жанре дали -$209.62,
+# то есть 87% ВСЕГО убытка счёта, при том что всё остальное — -$30 на $1,628 вложенных.
+# Почему жанр безнадёжен: исход зависит от события, которое не контролирует ни цель, ни мы
+# (сколько раз стример умрёт от скелета), рынки резолвятся в 0 целиком, а цены до резолва
+# держатся высоко — то есть выход вслед за целью не спасает. Мы теряли по $15-35 за раз.
+CONTENT_KW = (
+    "kai and speed", "kai or speed", "minecraft", "mrbeast", "netflix", "box office",
+    "opening weekend", "domestic gross", "youtube", "twitch", "streamer", "subscribers",
+    "monthly listeners", "spotify", "billboard", "rotten tomatoes", "imdb",
+    " views", "views?", "in-game deaths", "speedrun",
+    # Музыкальные чарты. В книге они лежат с ОБРЕЗАННЫМИ названиями («…be the Bill»), поэтому
+    # по «billboard» ловились не все — добираем формулировки самих рынков.
+    "us song", "first week album", "hot 100", "song on spotify",
+)
+
 # ТЕННИС/КРИКЕТ — добор к спорт-фильтру (просачивались: Wimbledon, крикет).
 SPORT_EXTRA_KW = (
     "wimbledon", "roland garros", "australian open", "us open", " atp ", " wta ",
@@ -156,6 +172,8 @@ def _blocked_reason(title: str):
         return "sport"
     if any(k in t for k in WEATHER_KW):
         return "weather"
+    if any(k in t for k in CONTENT_KW):
+        return "content"                               # просмотры/стримы/сборы кино/чарты
     return None
 
 
